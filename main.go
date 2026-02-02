@@ -231,7 +231,7 @@ func computeSKI(priv *rsa.PrivateKey) []byte {
 func handleProxy() {
 	caCertPath := flag.String("cacert", "ca-cert.pem", "Path to CA certificate")
 	caKeyPath := flag.String("cakey", "ca-key.pem", "Path to CA private key")
-	listenAddr := flag.String("listen", ":8443", "Listen address")
+	listenAddr := flag.String("listen", "127.0.0.1:8443", "Listen address")
 	cacheSize := flag.Int("certCacheSize", 200, "Size of the certificate cache")
 	flag.CommandLine.Parse(os.Args[2:])
 
@@ -246,6 +246,8 @@ func handleProxy() {
 		CertManager: cm,
 		Client: &http.Client{
 			Transport: &http.Transport{
+				// 显式禁用系统代理，确保上游连接为直接连接
+				Proxy: nil,
 				TLSClientConfig: &tls.Config{
 					MinVersion: tls.VersionTLS12,
 				},
@@ -580,6 +582,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	defer tlsClientConn.Close()
 
 	// 4. 与真实上游服务器建立 TLS 连接
+	// 注意：此处直接使用 tls.Dial 建立 TCP 连接，不经过系统 HTTP 代理
 	upstreamConn, err := tls.Dial("tcp", destHost, &tls.Config{
 		MinVersion: tls.VersionTLS12,
 	})

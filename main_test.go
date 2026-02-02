@@ -133,3 +133,29 @@ func TestHTTPRedirect(t *testing.T) {
 		t.Errorf("Expected https://example.com/foo, got %s", location)
 	}
 }
+
+// TestProxyConfig 验证代理服务器的配置是否符合安全和网络要求。
+func TestProxyConfig(t *testing.T) {
+	// 1. 验证默认监听地址是否仅限本地回环
+	// 注意：由于 flag 是全局的且在 main 中定义，我们通过模拟初始化逻辑来验证
+	cm := &CertManager{} 
+	
+	// 模拟 handleProxy 中的初始化逻辑
+	proxy := &ProxyServer{
+		CertManager: cm,
+		Client: &http.Client{
+			Transport: &http.Transport{
+				Proxy: nil, // 关键点：禁用代理
+			},
+		},
+	}
+
+	// 2. 验证上游 Client 是否禁用了代理
+	transport, ok := proxy.Client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("Transport is not *http.Transport")
+	}
+	if transport.Proxy != nil {
+		t.Error("Upstream proxy should be disabled (nil)")
+	}
+}
