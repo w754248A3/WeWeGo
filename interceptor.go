@@ -31,36 +31,19 @@ func (i *FixedInterceptor) OnIntercept(ctx *InterceptContext) (*InterceptResult,
 	}, nil
 }
 
-/*
-使用示例 (在 main.go 的 handleProxy 中):
-
-func handleProxy() {
-    // ... 前置逻辑
-    
-    // 创建一个固定将所有请求导向 1.1.1.1 并使用固定 SNI 的拦截器
-    interceptor := NewFixedInterceptor("1.1.1.1", "custom.domain.com")
-    
-    proxy := &ProxyServer{
-        CertManager: cm,
-        Interceptor: interceptor, // 注册拦截器
-        // ... 其他配置
-    }
-    // ... 后续逻辑
-}
-*/
-
-
 
 
 // DemoInterceptor 演示了如何同时实现请求和响应拦截器。
 // 它展示了修改路径、添加/删除 Header 的功能。
 type DemoInterceptor struct{
 	UpstreamHost string // 上游代理主机名/IP
+	PathReplace  string // 替换路径的字符串
 }
 
-func NewDemoInterceptor(upstreamHost string) *DemoInterceptor {
+func NewDemoInterceptor(upstreamHost, pathReplace string) *DemoInterceptor {
 	return &DemoInterceptor{
 		UpstreamHost: upstreamHost,
+		PathReplace:  pathReplace,
 	}
 }
 
@@ -77,7 +60,7 @@ func (d *DemoInterceptor) OnRequest(req *http.Request) error {
 	//log.Printf("[DemoInterceptor] Request URL: %s", url)
 
 	// 1. 修改路径
-	req.URL.Path = "/"
+	req.URL.Path = d.PathReplace
 
 	// 2. 修改 Host 头 (必须直接修改 req.Host 字段)
 	req.Host = d.UpstreamHost
@@ -103,21 +86,3 @@ func (d *DemoInterceptor) OnResponse(resp *http.Response) error {
 
 	return nil
 }
-
-/*
-使用示例 (在 main.go 的 handleProxy 中):
-
-func handleProxy() {
-    // ... 前置逻辑
-    
-    demo := &DemoInterceptor{}
-    
-    proxy := &ProxyServer{
-        CertManager: cm,
-        RequestInterceptor:  demo, // 注册请求拦截器
-        ResponseInterceptor: demo, // 注册响应拦截器
-        // ... 其他配置
-    }
-    // ... 后续逻辑
-}
-*/

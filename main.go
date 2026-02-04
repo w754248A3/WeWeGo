@@ -236,6 +236,8 @@ func handleProxy() {
 	cacheSize := flag.Int("certCacheSize", 200, "Size of the certificate cache")
 	upstreamStr := flag.String("upstream", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
 	upstreamHost := flag.String("upstreamHost", "", "Upstream proxy host (e.g. 127.0.0.1)")
+	pathReplace := flag.String("pathReplace", "/", "Replace path in request (e.g. /new-path)")
+	
 	flag.CommandLine.Parse(os.Args[2:])
 
 	// 验证上游主机是否指定
@@ -285,7 +287,7 @@ func handleProxy() {
 
 	interceptor := NewFixedInterceptor(*upstreamHost, *upstreamHost)
     // 实例化拦截器
-	demo := NewDemoInterceptor(*upstreamHost)
+	demo := NewDemoInterceptor(*upstreamHost, *pathReplace)
 
 	proxy := &ProxyServer{
 		CertManager:         cm,
