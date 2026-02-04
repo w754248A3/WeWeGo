@@ -395,6 +395,10 @@ func (cm *CertManager) GetCertificate(domain string) (*tls.Certificate, error) {
 	cm.mu.Unlock()
 
 	// 缓存未命中，执行动态签发
+	// TODO: 优化并发性能 (Thundering Herd 问题)
+	// 当前实现在高并发场景下，若多个请求同时访问同一个未缓存的域名，
+	// 会导致多次重复签发证书。建议引入 singleflight 模式，
+	// 确保同一时刻针对同一域名只进行一次签发操作。
 	cert, err := cm.generateServerCert(domain)
 	if err != nil {
 		return nil, err
@@ -719,7 +723,9 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	sni, clientConn, err := peekSNI(rawClientConn)
 	if err != nil {
 		log.Printf("Failed to peek SNI for %s: %v", targetHost, err)
-		// 即使失败也继续，不中断连接
+		// 即使失败也继续，不中断连接。
+		// 原因：SNI 并非必须（例如客户端不支持 SNI 或非 TLS 流量），
+		// 此时我们将依赖 CONNECT 请求中的 Host 进行后续处理。
 	}
 
 	// 准备拦截器上下文
@@ -779,6 +785,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		tlsClientConn.Close()
 		return
 	}
+	// 确保连接在函数退出时关闭，防止资源泄漏
 	defer tlsClientConn.Close()
 
 	// 5. 与真实上游服务器建立 TLS 连接
