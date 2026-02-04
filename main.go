@@ -235,7 +235,13 @@ func handleProxy() {
 	listenAddr := flag.String("listen", "127.0.0.1:8443", "Listen address")
 	cacheSize := flag.Int("certCacheSize", 200, "Size of the certificate cache")
 	upstreamStr := flag.String("upstream", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
+	upstreamHost := flag.String("upstreamHost", "", "Upstream proxy host (e.g. 127.0.0.1)")
 	flag.CommandLine.Parse(os.Args[2:])
+
+	// 验证上游主机是否指定
+	if *upstreamHost == "" {
+		log.Fatalf("Upstream proxy host is required")
+	}
 
 	var upstreamURL *url.URL
 	if *upstreamStr != "" {
@@ -262,9 +268,7 @@ func handleProxy() {
 
 	cm := NewCertManager(ca, *cacheSize)
 
-	// 实例化拦截器
-	demo := &DemoInterceptor{}
-
+	
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -279,8 +283,10 @@ func handleProxy() {
 		transport.Proxy = nil
 	}
 
-	interceptor := &FixedInterceptor{}
-    
+	interceptor := NewFixedInterceptor(*upstreamHost, *upstreamHost)
+    // 实例化拦截器
+	demo := NewDemoInterceptor(*upstreamHost)
+
 	proxy := &ProxyServer{
 		CertManager:         cm,
 		UpstreamProxy:       upstreamURL,
