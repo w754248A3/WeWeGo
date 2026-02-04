@@ -40,6 +40,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -233,7 +234,25 @@ func handleProxy() {
 	caKeyPath := flag.String("cakey", "ca-key.pem", "Path to CA private key")
 	listenAddr := flag.String("listen", "127.0.0.1:8443", "Listen address")
 	cacheSize := flag.Int("certCacheSize", 200, "Size of the certificate cache")
+	upstreamStr := flag.String("upstream", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
 	flag.CommandLine.Parse(os.Args[2:])
+
+	var upstreamURL *url.URL
+	if *upstreamStr != "" {
+		var err error
+		upstreamURL, err = url.Parse(*upstreamStr)
+		if err != nil {
+			log.Fatalf("Invalid upstream proxy URL: %v", err)
+		}
+		// 补全默认端口
+		if upstreamURL.Port() == "" {
+			if upstreamURL.Scheme == "https" {
+				upstreamURL.Host = net.JoinHostPort(upstreamURL.Hostname(), "443")
+			} else {
+				upstreamURL.Host = net.JoinHostPort(upstreamURL.Hostname(), "80")
+			}
+		}
+	}
 
 	// 加载 CA 证书对，用于动态签发子证书
 	ca, err := loadCA(*caCertPath, *caKeyPath)
@@ -242,16 +261,26 @@ func handleProxy() {
 	}
 
 	cm := NewCertManager(ca, *cacheSize)
+
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+
+	// 如果指定了上游代理，则配置 Transport 使用该代理
+	if upstreamURL != nil {
+		transport.Proxy = http.ProxyURL(upstreamURL)
+	} else {
+		// 显式禁用系统代理，确保上游连接为直接连接
+		transport.Proxy = nil
+	}
+
 	proxy := &ProxyServer{
-		CertManager: cm,
+		CertManager:   cm,
+		UpstreamProxy: upstreamURL,
 		Client: &http.Client{
-			Transport: &http.Transport{
-				// 显式禁用系统代理，确保上游连接为直接连接
-				Proxy: nil,
-				TLSClientConfig: &tls.Config{
-					MinVersion: tls.VersionTLS12,
-				},
-			},
+			Transport: transport,
 			// 默认不跟随重定向，将重定向响应透传给客户端
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
@@ -496,8 +525,19 @@ func (c *LRUCache) removeOldest() {
 // 设计模式：
 // 实现 http.Handler 接口，作为代理逻辑的调度器。
 type ProxyServer struct {
-	CertManager *CertManager // 证书管理器，用于 MITM
-	Client      *http.Client // 用于向上游服务器发起请求的客户端
+	CertManager   *CertManager // 证书管理器，用于 MITM
+	Client        *http.Client // 用于向上游服务器发起请求的客户端
+	UpstreamProxy *url.URL     // 可选的上游代理服务器
+}
+
+// bufferedConn 用于包装 net.Conn 并处理 bufio.Reader 中的缓冲数据。
+type bufferedConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) {
+	return b.r.Read(p)
 }
 
 // ServeHTTP 处理所有传入的代理请求。
@@ -582,17 +622,65 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	defer tlsClientConn.Close()
 
 	// 4. 与真实上游服务器建立 TLS 连接
-	// 注意：此处直接使用 tls.Dial 建立 TCP 连接，不经过系统 HTTP 代理
-	upstreamConn, err := tls.Dial("tcp", destHost, &tls.Config{
-		MinVersion: tls.VersionTLS12,
-	})
-	if err != nil {
-		log.Printf("Failed to connect to upstream %s: %v", destHost, err)
-		// FIXME: 按照规范，若握手失败应向浏览器返回 502。
-		// 但由于在 CONNECT 模式下，200 OK 已提前发送给客户端，
-		// 此时 TCP 隧道已建立，直接写入 HTTP 502 可能会被客户端 TLS 层解析为握手失败。
-		// 优化的方案是在 Hijack 之前预判上游可用性，但这会增加延迟。
-		return
+	var upstreamConn net.Conn
+	if p.UpstreamProxy != nil {
+		// 4.1 通过上游代理建立连接
+		proxyConn, err := net.DialTimeout("tcp", p.UpstreamProxy.Host, 10*time.Second)
+		if err != nil {
+			log.Printf("Failed to connect to upstream proxy %s: %v", p.UpstreamProxy.Host, err)
+			return
+		}
+
+		// 4.2 发送 CONNECT 请求建立隧道
+		connectReq := &http.Request{
+			Method: http.MethodConnect,
+			URL:    &url.URL{Opaque: destHost},
+			Host:   destHost,
+			Header: make(http.Header),
+		}
+		if err := connectReq.Write(proxyConn); err != nil {
+			proxyConn.Close()
+			log.Printf("Failed to write CONNECT request to proxy: %v", err)
+			return
+		}
+
+		// 4.3 读取代理响应
+		br := bufio.NewReader(proxyConn)
+		resp, err := http.ReadResponse(br, connectReq)
+		if err != nil {
+			proxyConn.Close()
+			log.Printf("Failed to read CONNECT response from proxy: %v", err)
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			proxyConn.Close()
+			log.Printf("Proxy returned non-200 status: %s", resp.Status)
+			return
+		}
+
+		// 4.4 在建立的隧道上进行 TLS 客户端握手
+		// 注意：需使用 br 确保不丢失 http.ReadResponse 已读取的缓冲数据
+		var combinedConn net.Conn = &bufferedConn{Conn: proxyConn, r: io.MultiReader(br, proxyConn)}
+		tlsUpstreamConn := tls.Client(combinedConn, &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: host,
+		})
+		if err := tlsUpstreamConn.Handshake(); err != nil {
+			tlsUpstreamConn.Close()
+			log.Printf("TLS handshake with upstream %s via proxy failed: %v", destHost, err)
+			return
+		}
+		upstreamConn = tlsUpstreamConn
+	} else {
+		// 4.1 直接与真实上游建立 TLS 连接
+		var err error
+		upstreamConn, err = tls.Dial("tcp", destHost, &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		})
+		if err != nil {
+			log.Printf("Failed to connect to upstream %s: %v", destHost, err)
+			return
+		}
 	}
 	defer upstreamConn.Close()
 
