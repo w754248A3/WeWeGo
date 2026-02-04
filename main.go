@@ -51,6 +51,14 @@ import (
 	"software.sslmate.com/src/go-pkcs12"
 )
 
+var debugMode = os.Getenv("PROXY_DEBUG") == "1"
+
+func logDebug(format string, v ...interface{}) {
+	if debugMode {
+		log.Printf("[DEBUG] "+format, v...)
+	}
+}
+
 // main 是程序的入口点，负责解析子命令并分发执行逻辑。
 //
 // 业务用途：
@@ -314,7 +322,7 @@ func handleProxy() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		sig := <-sigChan
-		log.Printf("Received signal %v, shutting down...", sig)
+		logDebug("Received signal %v, shutting down...", sig)
 
 		// 给现有连接 5 秒的处理宽限期
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -324,7 +332,7 @@ func handleProxy() {
 		}
 	}()
 
-	log.Printf("Starting proxy on %s", *listenAddr)
+	logDebug("Starting proxy on %s", *listenAddr)
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("ListenAndServe error: %v", err)
 	}
@@ -426,9 +434,7 @@ func (cm *CertManager) GetCertificate(domain string) (*tls.Certificate, error) {
 // 返回值：
 // *tls.Certificate - 签发成功的证书对象
 func (cm *CertManager) generateServerCert(domain string) (*tls.Certificate, error) {
-	if os.Getenv("PROXY_DEBUG") == "1" {
-		log.Printf("[DEBUG] Generating cert for %s", domain)
-	}
+	logDebug("Generating cert for %s", domain)
 
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -781,9 +787,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// 作为服务器与客户端握手
 	tlsClientConn := tls.Server(clientConn, tlsConfig)
 	if err := tlsClientConn.Handshake(); err != nil {
-		if os.Getenv("PROXY_DEBUG") == "1" {
-			log.Printf("[DEBUG] TLS handshake failed with client for %s: %v", certHost, err)
-		}
+		logDebug("TLS handshake failed with client for %s: %v", certHost, err)
 		tlsClientConn.Close()
 		return
 	}
@@ -867,16 +871,12 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upstreamConn.Close()
 
-	if os.Getenv("PROXY_DEBUG") == "1" {
-		log.Printf("[DEBUG] MitM Session started for %s (SNI: %s, UpstreamSNI: %s)", targetHost, sni, interceptRes.UpstreamSNI)
-	}
+	logDebug("MitM Session started for %s (SNI: %s, UpstreamSNI: %s)", targetHost, sni, interceptRes.UpstreamSNI)
 
 	// 6. 开始双向解密转发
 	p.transferWithLogging(tlsClientConn, upstreamConn, targetHost)
 
-	if os.Getenv("PROXY_DEBUG") == "1" {
-		log.Printf("[DEBUG] MitM Session closed for %s", targetHost)
-	}
+	logDebug("MitM Session closed for %s", targetHost)
 }
 
 // transferWithLogging 管理客户端与服务器之间的解密流量转发。
@@ -896,9 +896,7 @@ func (p *ProxyServer) transferWithLogging(client net.Conn, server net.Conn, host
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
 			if err != io.EOF && !strings.Contains(err.Error(), "closed") {
-				if os.Getenv("PROXY_DEBUG") == "1" {
-					log.Printf("[DEBUG] Error reading request from %s: %v", host, err)
-				}
+				logDebug("Error reading request from %s: %v", host, err)
 			}
 			return
 		}
@@ -906,25 +904,19 @@ func (p *ProxyServer) transferWithLogging(client net.Conn, server net.Conn, host
 		// 必须清除 RequestURI，否则后续 req.Write 会报错
 		req.RequestURI = ""
 
-		if os.Getenv("PROXY_DEBUG") == "1" {
-			log.Printf("[DEBUG] [%s] Request received", host)
-		}
+		logDebug("[%s] Request received", host)
 
 		// 2. 应用请求拦截器 (可在此时修改 Header、Path 或拦截请求)
 		if p.RequestInterceptor != nil {
 			if err := p.RequestInterceptor.OnRequest(req); err != nil {
-				if os.Getenv("PROXY_DEBUG") == "1" {
-					log.Printf("[DEBUG] [%s] Request intercepted: %v", host, err)
-				}
+				logDebug("[%s] Request intercepted: %v", host, err)
 				return
 			}
 		}
 
 		// 3. 将请求转发给真实上游服务器
 		if err := req.Write(server); err != nil {
-			if os.Getenv("PROXY_DEBUG") == "1" {
-				log.Printf("[DEBUG] [%s] Error writing to server: %v", host, err)
-			}
+			logDebug("[%s] Error writing to server: %v", host, err)
 			return
 		}
 
@@ -932,32 +924,24 @@ func (p *ProxyServer) transferWithLogging(client net.Conn, server net.Conn, host
 		resp, err := http.ReadResponse(serverReader, req)
 		if err != nil {
 			if err != io.EOF && !strings.Contains(err.Error(), "closed") {
-				if os.Getenv("PROXY_DEBUG") == "1" {
-					log.Printf("[DEBUG] [%s] Error reading response: %v", host, err)
-				}
+				logDebug("[%s] Error reading response: %v", host, err)
 			}
 			return
 		}
 
-		if os.Getenv("PROXY_DEBUG") == "1" {
-			log.Printf("[DEBUG] [%s] Response received: %s", host, resp.Status)
-		}
+		logDebug("[%s] Response received: %s", host, resp.Status)
 
 		// 5. 应用响应拦截器 (可在此时注入脚本、修改 Header 或记录数据)
 		if p.ResponseInterceptor != nil {
 			if err := p.ResponseInterceptor.OnResponse(resp); err != nil {
-				if os.Getenv("PROXY_DEBUG") == "1" {
-					log.Printf("[DEBUG] [%s] Response intercepted: %v", host, err)
-				}
+				logDebug("[%s] Response intercepted: %v", host, err)
 				return
 			}
 		}
 
 		// 6. 将响应写回客户端
 		if err := resp.Write(client); err != nil {
-			if os.Getenv("PROXY_DEBUG") == "1" {
-				log.Printf("[DEBUG] [%s] Error writing to client: %v", host, err)
-			}
+			logDebug("[%s] Error writing to client: %v", host, err)
 			return
 		}
 		resp.Body.Close()

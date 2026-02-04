@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"net/http"
 )
 
@@ -22,7 +21,7 @@ func NewFixedInterceptor(resolveHost, upstreamSNI string) *FixedInterceptor {
 // OnIntercept 实现 DNSAndSNIInterceptor 接口。
 // 它会根据是否配置了上游代理动态决定是否启用远程解析。
 func (i *FixedInterceptor) OnIntercept(ctx *InterceptContext) (*InterceptResult, error) {
-	log.Printf("[FixedInterceptor] Request for %s:%s (SNI: %s). Result: ResolveHost=%s, UpstreamSNI=%s",
+	logDebug("[FixedInterceptor] Request for %s:%s (SNI: %s). Result: ResolveHost=%s, UpstreamSNI=%s",
 		ctx.TargetHost, ctx.TargetPort, ctx.SNI, i.FixedResolveHost, i.FixedUpstreamSNI)
 
 	return &InterceptResult{
