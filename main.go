@@ -262,6 +262,9 @@ func handleProxy() {
 
 	cm := NewCertManager(ca, *cacheSize)
 
+	// 实例化拦截器
+	demo := &DemoInterceptor{}
+
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -276,9 +279,14 @@ func handleProxy() {
 		transport.Proxy = nil
 	}
 
+	interceptor := &FixedInterceptor{}
+    
 	proxy := &ProxyServer{
-		CertManager:   cm,
-		UpstreamProxy: upstreamURL,
+		CertManager:         cm,
+		UpstreamProxy:       upstreamURL,
+		RequestInterceptor:  demo,
+		ResponseInterceptor: demo,
+		Interceptor:         interceptor,
 		Client: &http.Client{
 			Transport: transport,
 			// 默认不跟随重定向，将重定向响应透传给客户端
@@ -785,8 +793,10 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 		// 5.2 发送 CONNECT 请求建立隧道
 		proxyDest := upstreamTarget
-		if interceptRes.RemoteResolve {
-			proxyDest = destHost // 强制透传原始域名给代理
+		// 只有在未指定自定义解析目标（ResolveHost 为空或等于原始主机名）且要求远程解析时，才透传原始域名给代理。
+		// 如果用户指定了不同的 ResolveHost，说明用户希望连接到特定的地址。
+		if (interceptRes.ResolveHost == "" || interceptRes.ResolveHost == targetHost) && interceptRes.RemoteResolve {
+			proxyDest = destHost
 		}
 
 		connectReq := &http.Request{
@@ -877,6 +887,9 @@ func (p *ProxyServer) transferWithLogging(client net.Conn, server net.Conn, host
 			return
 		}
 
+		// 必须清除 RequestURI，否则后续 req.Write 会报错
+		req.RequestURI = ""
+
 		if os.Getenv("PROXY_DEBUG") == "1" {
 			log.Printf("[DEBUG] [%s] Request received", host)
 		}
@@ -965,6 +978,8 @@ type DNSAndSNIInterceptor interface {
 
 // RequestInterceptor 定义了请求拦截器接口。
 type RequestInterceptor interface {
+	// OnRequest 在请求发送给上游前调用。
+	// 注意：若要修改 Host 头，请直接修改 req.Host 字段，而非 req.Header。
 	OnRequest(req *http.Request) error
 }
 

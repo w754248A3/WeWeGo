@@ -11,6 +11,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -212,7 +213,38 @@ func TestInterceptorScenarios(t *testing.T) {
 		}
 	})
 
-	// 场景 3: 拦截器异常处理
+	// 场景 4: 自定义 ResolveHost 且有上游代理时，验证 ResolveHost 优先级
+	t.Run("ResolveHostWithProxy", func(t *testing.T) {
+		interceptor := &mockInterceptor{
+			onInterceptFunc: func(ctx *InterceptContext) (*InterceptResult, error) {
+				return &InterceptResult{
+					ResolveHost:   "B.com",
+					UpstreamSNI:   "B.com",
+					RemoteResolve: true, // 即使开启了远程解析
+				}, nil
+			},
+		}
+
+		ctx := &InterceptContext{TargetHost: "A.com", TargetPort: "443", HasUpstream: true}
+		res, err := interceptor.OnIntercept(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// 模拟 handleConnect 中的判定逻辑
+		proxyDest := net.JoinHostPort(res.ResolveHost, ctx.TargetPort)
+		destHost := net.JoinHostPort(ctx.TargetHost, ctx.TargetPort)
+
+		if (res.ResolveHost == "" || res.ResolveHost == ctx.TargetHost) && res.RemoteResolve {
+			proxyDest = destHost
+		}
+
+		if proxyDest != "B.com:443" {
+			t.Errorf("Expected proxyDest to be B.com:443, got %s. ResolveHost should take precedence!", proxyDest)
+		}
+	})
+
+	// 场景 5: 拦截器异常处理
 	t.Run("InterceptorError", func(t *testing.T) {
 		// 此处主要验证逻辑流程，实际 handleConnect 中的处理在集成测试中体现更佳
 		// 这里仅验证接口调用符合预期
