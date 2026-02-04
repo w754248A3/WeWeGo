@@ -159,3 +159,95 @@ func TestProxyConfig(t *testing.T) {
 		t.Error("Upstream proxy should be disabled (nil)")
 	}
 }
+
+// mockInterceptor 用于测试
+type mockInterceptor struct {
+	onInterceptFunc func(ctx *InterceptContext) (*InterceptResult, error)
+}
+
+func (m *mockInterceptor) OnIntercept(ctx *InterceptContext) (*InterceptResult, error) {
+	return m.onInterceptFunc(ctx)
+}
+
+// TestInterceptorScenarios 验证拦截器在各种场景下的表现。
+func TestInterceptorScenarios(t *testing.T) {
+	// 场景 1: 强制指定 SNI
+	t.Run("ForceSNI", func(t *testing.T) {
+		interceptor := &mockInterceptor{
+			onInterceptFunc: func(ctx *InterceptContext) (*InterceptResult, error) {
+				return &InterceptResult{
+					ResolveHost: ctx.TargetHost,
+					UpstreamSNI: "forced.example.com",
+				}, nil
+			},
+		}
+
+		ctx := &InterceptContext{TargetHost: "example.com", TargetPort: "443", SNI: "client.example.com"}
+		res, err := interceptor.OnIntercept(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.UpstreamSNI != "forced.example.com" {
+			t.Errorf("Expected forced.example.com, got %s", res.UpstreamSNI)
+		}
+	})
+
+	// 场景 2: 跳过本地 DNS (RemoteResolve)
+	t.Run("RemoteResolve", func(t *testing.T) {
+		interceptor := &mockInterceptor{
+			onInterceptFunc: func(ctx *InterceptContext) (*InterceptResult, error) {
+				return &InterceptResult{
+					RemoteResolve: true,
+				}, nil
+			},
+		}
+
+		ctx := &InterceptContext{TargetHost: "blocked.com", TargetPort: "443", HasUpstream: true}
+		res, err := interceptor.OnIntercept(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.RemoteResolve {
+			t.Error("Expected RemoteResolve to be true")
+		}
+	})
+
+	// 场景 3: 拦截器异常处理
+	t.Run("InterceptorError", func(t *testing.T) {
+		// 此处主要验证逻辑流程，实际 handleConnect 中的处理在集成测试中体现更佳
+		// 这里仅验证接口调用符合预期
+		expectedErr := "interceptor failed"
+		interceptor := &mockInterceptor{
+			onInterceptFunc: func(ctx *InterceptContext) (*InterceptResult, error) {
+				return nil, http.ErrAbortHandler
+			},
+		}
+
+		_, err := interceptor.OnIntercept(&InterceptContext{})
+		if err != http.ErrAbortHandler {
+			t.Errorf("Expected %v, got %v", expectedErr, err)
+		}
+	})
+}
+
+// TestParseSNI 验证 SNI 解析逻辑的正确性。
+func TestParseSNI(t *testing.T) {
+	// 一个真实的 TLS ClientHello 报文片段 (包含 SNI: example.com)
+	rawClientHello := []byte{
+		0x16, 0x03, 0x01, 0x00, 0xba, 0x01, 0x00, 0x00, 0xb6, 0x03, 0x03, 0x11, 0x22, 0x33, 0x44, 0x55,
+		0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+		0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x00, 0x00, 0x02, 0x00, 0x2f,
+		0x01, 0x00, 0x00, 0x8b, 0x00, 0x00, 0x00, 0x10, 0x00, 0x0e, 0x00, 0x00, 0x0b, 0x65, 0x78, 0x61,
+		0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d,
+	}
+
+	sni := parseSNI(rawClientHello)
+	if sni != "example.com" {
+		t.Errorf("Expected example.com, got %s", sni)
+	}
+
+	// 测试非 TLS 数据
+	if parseSNI([]byte("GET / HTTP/1.1")) != "" {
+		t.Error("Expected empty SNI for non-TLS data")
+	}
+}

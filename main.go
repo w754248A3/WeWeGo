@@ -525,9 +525,12 @@ func (c *LRUCache) removeOldest() {
 // 设计模式：
 // 实现 http.Handler 接口，作为代理逻辑的调度器。
 type ProxyServer struct {
-	CertManager   *CertManager // 证书管理器，用于 MITM
-	Client        *http.Client // 用于向上游服务器发起请求的客户端
-	UpstreamProxy *url.URL     // 可选的上游代理服务器
+	CertManager         *CertManager         // 证书管理器，用于 MITM
+	Client              *http.Client         // 用于向上游服务器发起请求的客户端
+	UpstreamProxy       *url.URL             // 可选的上游代理服务器
+	Interceptor         DNSAndSNIInterceptor // 可插拔的拦截器
+	RequestInterceptor  RequestInterceptor   // 请求拦截器
+	ResponseInterceptor ResponseInterceptor  // 响应拦截器
 }
 
 // bufferedConn 用于包装 net.Conn 并处理 bufio.Reader 中的缓冲数据。
@@ -538,6 +541,104 @@ type bufferedConn struct {
 
 func (b *bufferedConn) Read(p []byte) (int, error) {
 	return b.r.Read(p)
+}
+
+// peekSNI 预读 ClientHello 以提取 SNI，且不破坏原始连接。
+func peekSNI(conn net.Conn) (string, net.Conn, error) {
+	br := bufio.NewReader(conn)
+
+	// TLS 记录头 5 字节，ClientHello 通常前 1024 字节足够
+	data, err := br.Peek(1024)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return "", &bufferedConn{Conn: conn, r: br}, err
+	}
+
+	sni := parseSNI(data)
+	return sni, &bufferedConn{Conn: conn, r: br}, nil
+}
+
+// parseSNI 解析 TLS ClientHello 字节流中的 SNI 扩展。
+func parseSNI(data []byte) string {
+	if len(data) < 43 {
+		return ""
+	}
+
+	// 检查是否为 TLS Handshake (0x16)
+	if data[0] != 0x16 {
+		return ""
+	}
+
+	pos := 5 // 跳过 Record Header
+	if len(data) < pos+4 {
+		return ""
+	}
+
+	// Handshake Type 必须是 Client Hello (0x01)
+	if data[pos] != 0x01 {
+		return ""
+	}
+
+	pos += 38 // 跳过 Handshake Header, Version, Random
+
+	// Session ID
+	if pos >= len(data) {
+		return ""
+	}
+	sessionIDLen := int(data[pos])
+	pos += 1 + sessionIDLen
+
+	// Cipher Suites
+	if pos+1 >= len(data) {
+		return ""
+	}
+	cipherSuiteLen := int(data[pos])<<8 | int(data[pos+1])
+	pos += 2 + cipherSuiteLen
+
+	// Compression Methods
+	if pos >= len(data) {
+		return ""
+	}
+	compressionLen := int(data[pos])
+	pos += 1 + compressionLen
+
+	// Extensions
+	if pos+1 >= len(data) {
+		return ""
+	}
+	extensionsLen := int(data[pos])<<8 | int(data[pos+1])
+	pos += 2
+
+	end := pos + extensionsLen
+	if end > len(data) {
+		end = len(data)
+	}
+
+	for pos+4 < end {
+		extType := int(data[pos])<<8 | int(data[pos+1])
+		extLen := int(data[pos+2])<<8 | int(data[pos+3])
+		pos += 4
+
+		if extType == 0x00 { // SNI extension type
+			if pos+2 >= end {
+				return ""
+			}
+			pos += 2 // Server Name List Length
+			if pos < end && data[pos] == 0x00 {
+				pos++
+				if pos+1 >= end {
+					return ""
+				}
+				nameLen := int(data[pos])<<8 | int(data[pos+1])
+				pos += 2
+				if pos+nameLen <= end {
+					return string(data[pos : pos+nameLen])
+				}
+			}
+		}
+		pos += extLen
+	}
+
+	return ""
 }
 
 // ServeHTTP 处理所有传入的代理请求。
@@ -572,9 +673,12 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // 5. 调用 transferWithLogging 开始解密并转发流量。
 func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	destHost := r.URL.Host
-	host, _, _ := net.SplitHostPort(destHost)
-	if host == "" {
-		host = destHost
+	targetHost, targetPort, _ := net.SplitHostPort(destHost)
+	if targetHost == "" {
+		targetHost = destHost
+	}
+	if targetPort == "" {
+		targetPort = "443"
 	}
 
 	hijacker, ok := w.(http.Hijacker)
@@ -584,23 +688,66 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. 劫持底层 TCP 连接
-	clientConn, _, err := hijacker.Hijack()
+	rawClientConn, _, err := hijacker.Hijack()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 
 	// 2. 响应客户端 CONNECT 请求
-	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	_, err = rawClientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	if err != nil {
-		clientConn.Close()
+		rawClientConn.Close()
 		return
 	}
 
-	// 3. 执行中间人 (MitM) TLS 握手
-	cert, err := p.CertManager.GetCertificate(host)
+	// 3. 嗅探 SNI 并调用拦截器
+	sni, clientConn, err := peekSNI(rawClientConn)
 	if err != nil {
-		log.Printf("Failed to get certificate for %s: %v", host, err)
+		log.Printf("Failed to peek SNI for %s: %v", targetHost, err)
+		// 即使失败也继续，不中断连接
+	}
+
+	// 准备拦截器上下文
+	interceptCtx := &InterceptContext{
+		TargetHost:  targetHost,
+		TargetPort:  targetPort,
+		SNI:         sni,
+		HasUpstream: p.UpstreamProxy != nil,
+	}
+
+	// 默认结果（向后兼容）
+	interceptRes := &InterceptResult{
+		ResolveHost:   targetHost,
+		UpstreamSNI:   sni,
+		RemoteResolve: false,
+	}
+	if interceptRes.UpstreamSNI == "" {
+		interceptRes.UpstreamSNI = targetHost
+	}
+
+	// 调用拦截器
+	if p.Interceptor != nil {
+		res, err := p.Interceptor.OnIntercept(interceptCtx)
+		if err != nil {
+			log.Printf("Interceptor error for %s: %v, falling back to 502", targetHost, err)
+			clientConn.Close()
+			return
+		}
+		if res != nil {
+			interceptRes = res
+		}
+	}
+
+	// 4. 执行中间人 (MitM) TLS 握手
+	// 注意：证书应匹配客户端期望的域名 (SNI 或 CONNECT Host)
+	certHost := sni
+	if certHost == "" {
+		certHost = targetHost
+	}
+	cert, err := p.CertManager.GetCertificate(certHost)
+	if err != nil {
+		log.Printf("Failed to get certificate for %s: %v", certHost, err)
 		clientConn.Close()
 		return
 	}
@@ -614,28 +761,38 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	tlsClientConn := tls.Server(clientConn, tlsConfig)
 	if err := tlsClientConn.Handshake(); err != nil {
 		if os.Getenv("PROXY_DEBUG") == "1" {
-			log.Printf("[DEBUG] TLS handshake failed with client for %s: %v", host, err)
+			log.Printf("[DEBUG] TLS handshake failed with client for %s: %v", certHost, err)
 		}
 		tlsClientConn.Close()
 		return
 	}
 	defer tlsClientConn.Close()
 
-	// 4. 与真实上游服务器建立 TLS 连接
+	// 5. 与真实上游服务器建立 TLS 连接
 	var upstreamConn net.Conn
+	upstreamTarget := net.JoinHostPort(interceptRes.ResolveHost, targetPort)
+	if interceptRes.ResolveHost == "" {
+		upstreamTarget = destHost // 如果没有指定解析域名，回退到原始目标
+	}
+
 	if p.UpstreamProxy != nil {
-		// 4.1 通过上游代理建立连接
+		// 5.1 通过上游代理建立连接
 		proxyConn, err := net.DialTimeout("tcp", p.UpstreamProxy.Host, 10*time.Second)
 		if err != nil {
 			log.Printf("Failed to connect to upstream proxy %s: %v", p.UpstreamProxy.Host, err)
 			return
 		}
 
-		// 4.2 发送 CONNECT 请求建立隧道
+		// 5.2 发送 CONNECT 请求建立隧道
+		proxyDest := upstreamTarget
+		if interceptRes.RemoteResolve {
+			proxyDest = destHost // 强制透传原始域名给代理
+		}
+
 		connectReq := &http.Request{
 			Method: http.MethodConnect,
-			URL:    &url.URL{Opaque: destHost},
-			Host:   destHost,
+			URL:    &url.URL{Opaque: proxyDest},
+			Host:   proxyDest,
 			Header: make(http.Header),
 		}
 		if err := connectReq.Write(proxyConn); err != nil {
@@ -644,7 +801,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 4.3 读取代理响应
+		// 5.3 读取代理响应
 		br := bufio.NewReader(proxyConn)
 		resp, err := http.ReadResponse(br, connectReq)
 		if err != nil {
@@ -658,41 +815,41 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 4.4 在建立的隧道上进行 TLS 客户端握手
-		// 注意：需使用 br 确保不丢失 http.ReadResponse 已读取的缓冲数据
+		// 5.4 在建立的隧道上进行 TLS 客户端握手
 		var combinedConn net.Conn = &bufferedConn{Conn: proxyConn, r: io.MultiReader(br, proxyConn)}
 		tlsUpstreamConn := tls.Client(combinedConn, &tls.Config{
 			MinVersion: tls.VersionTLS12,
-			ServerName: host,
+			ServerName: interceptRes.UpstreamSNI,
 		})
 		if err := tlsUpstreamConn.Handshake(); err != nil {
 			tlsUpstreamConn.Close()
-			log.Printf("TLS handshake with upstream %s via proxy failed: %v", destHost, err)
+			log.Printf("TLS handshake with upstream %s via proxy failed: %v", proxyDest, err)
 			return
 		}
 		upstreamConn = tlsUpstreamConn
 	} else {
-		// 4.1 直接与真实上游建立 TLS 连接
+		// 5.1 直接与真实上游建立 TLS 连接
 		var err error
-		upstreamConn, err = tls.Dial("tcp", destHost, &tls.Config{
+		upstreamConn, err = tls.Dial("tcp", upstreamTarget, &tls.Config{
 			MinVersion: tls.VersionTLS12,
+			ServerName: interceptRes.UpstreamSNI,
 		})
 		if err != nil {
-			log.Printf("Failed to connect to upstream %s: %v", destHost, err)
+			log.Printf("Failed to connect to upstream %s: %v", upstreamTarget, err)
 			return
 		}
 	}
 	defer upstreamConn.Close()
 
 	if os.Getenv("PROXY_DEBUG") == "1" {
-		log.Printf("[DEBUG] MitM Session started for %s", host)
+		log.Printf("[DEBUG] MitM Session started for %s (SNI: %s, UpstreamSNI: %s)", targetHost, sni, interceptRes.UpstreamSNI)
 	}
 
-	// 5. 开始双向解密转发
-	p.transferWithLogging(tlsClientConn, upstreamConn, host)
+	// 6. 开始双向解密转发
+	p.transferWithLogging(tlsClientConn, upstreamConn, targetHost)
 
 	if os.Getenv("PROXY_DEBUG") == "1" {
-		log.Printf("[DEBUG] MitM Session closed for %s", host)
+		log.Printf("[DEBUG] MitM Session closed for %s", targetHost)
 	}
 }
 
@@ -724,12 +881,14 @@ func (p *ProxyServer) transferWithLogging(client net.Conn, server net.Conn, host
 			log.Printf("[DEBUG] [%s] Request received", host)
 		}
 
-		// 2. 应用请求过滤器 (可在此时修改 Header 或拦截请求)
-		if err := DefaultRequestFilter(req); err != nil {
-			if os.Getenv("PROXY_DEBUG") == "1" {
-				log.Printf("[DEBUG] [%s] Request filtered: %v", host, err)
+		// 2. 应用请求拦截器 (可在此时修改 Header、Path 或拦截请求)
+		if p.RequestInterceptor != nil {
+			if err := p.RequestInterceptor.OnRequest(req); err != nil {
+				if os.Getenv("PROXY_DEBUG") == "1" {
+					log.Printf("[DEBUG] [%s] Request intercepted: %v", host, err)
+				}
+				return
 			}
-			return
 		}
 
 		// 3. 将请求转发给真实上游服务器
@@ -755,12 +914,14 @@ func (p *ProxyServer) transferWithLogging(client net.Conn, server net.Conn, host
 			log.Printf("[DEBUG] [%s] Response received: %s", host, resp.Status)
 		}
 
-		// 5. 应用响应过滤器 (可在此时注入脚本或记录数据)
-		if err := DefaultResponseFilter(resp); err != nil {
-			if os.Getenv("PROXY_DEBUG") == "1" {
-				log.Printf("[DEBUG] [%s] Response filtered: %v", host, err)
+		// 5. 应用响应拦截器 (可在此时注入脚本、修改 Header 或记录数据)
+		if p.ResponseInterceptor != nil {
+			if err := p.ResponseInterceptor.OnResponse(resp); err != nil {
+				if os.Getenv("PROXY_DEBUG") == "1" {
+					log.Printf("[DEBUG] [%s] Response intercepted: %v", host, err)
+				}
+				return
 			}
-			return
 		}
 
 		// 6. 将响应写回客户端
@@ -780,20 +941,34 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Plain HTTP not supported, use HTTPS", http.StatusForbidden)
 }
 
-// --- Filters ---
+// --- Filters & Interceptors ---
 
-// RequestFilter 定义了请求过滤器的函数签名。
-type RequestFilter func(*http.Request) error
-
-// ResponseFilter 定义了响应过滤器的函数签名。
-type ResponseFilter func(*http.Response) error
-
-// DefaultRequestFilter 是默认的请求过滤器，不执行任何操作。
-var DefaultRequestFilter RequestFilter = func(req *http.Request) error {
-	return nil
+// InterceptContext 包含拦截器所需的上下文信息。
+type InterceptContext struct {
+	TargetHost  string // CONNECT 请求中的主机名
+	TargetPort  string // CONNECT 请求中的端口
+	SNI         string // 从下游 TLS ClientHello 提取的 SNI
+	HasUpstream bool   // 是否配置了上游代理
 }
 
-// DefaultResponseFilter 是默认的响应过滤器，不执行任何操作。
-var DefaultResponseFilter ResponseFilter = func(resp *http.Response) error {
-	return nil
+// InterceptResult 包含拦截器的处理结果。
+type InterceptResult struct {
+	ResolveHost   string // 用于本地解析的域名/IP（为空表示跳过解析）
+	UpstreamSNI   string // 用于上游 TLS 握手的 SNI
+	RemoteResolve bool   // 是否由上游代理执行 DNS 解析
+}
+
+// DNSAndSNIInterceptor 定义了可插拔的 DNS 与 SNI 拦截接口。
+type DNSAndSNIInterceptor interface {
+	OnIntercept(ctx *InterceptContext) (*InterceptResult, error)
+}
+
+// RequestInterceptor 定义了请求拦截器接口。
+type RequestInterceptor interface {
+	OnRequest(req *http.Request) error
+}
+
+// ResponseInterceptor 定义了响应拦截器接口。
+type ResponseInterceptor interface {
+	OnResponse(resp *http.Response) error
 }

@@ -58,27 +58,72 @@ go build -o wewego main.go
 $env:PROXY_DEBUG=1; ./wewego proxy
 ```
 
-## 自定义过滤器
+## 自定义拦截器
 
-您可以通过修改 `main.go` 中的 `DefaultRequestFilter` 和 `DefaultResponseFilter` 来实现自定义逻辑。
+WeWeGo 提供了三种类型的拦截器，允许您在不同阶段注入自定义逻辑。
 
-示例：修改请求头
+### 1. DNS 与 SNI 拦截器 (Interceptor)
+
+`DNSAndSNIInterceptor` 允许在连接发起前修改 DNS 解析目标、上游 SNI，或将解析权移交给上游代理。
+
+**接口定义：**
 
 ```go
-var DefaultRequestFilter RequestFilter = func(req *http.Request) error {
-    req.Header.Set("X-Proxy-By", "WeWeGo")
+type DNSAndSNIInterceptor interface {
+    OnIntercept(ctx *InterceptContext) (*InterceptResult, error)
+}
+```
+
+### 2. 请求拦截器 (RequestInterceptor)
+
+`RequestInterceptor` 允许在请求发送给上游服务器之前对其进行修改。您可以修改路径、Header 或拦截请求。
+
+**接口定义：**
+
+```go
+type RequestInterceptor interface {
+    OnRequest(req *http.Request) error
+}
+```
+
+**示例：修改路径与 Header**
+
+```go
+func (d *MyInterceptor) OnRequest(req *http.Request) error {
+    // 修改路径
+    if req.URL.Path == "/old" {
+        req.URL.Path = "/new"
+    }
+    // 添加 Header
+    req.Header.Set("X-Proxy", "WeWeGo")
+    // 删除 Header
+    req.Header.Del("User-Agent")
     return nil
 }
 ```
 
-示例：拦截特定域名
+### 3. 响应拦截器 (ResponseInterceptor)
+
+`ResponseInterceptor` 允许在响应写回客户端之前对其进行处理或修改。
+
+**接口定义：**
 
 ```go
-var DefaultRequestFilter RequestFilter = func(req *http.Request) error {
-    if strings.Contains(req.Host, "forbidden.com") {
-        return fmt.Errorf("access denied")
-    }
-    return nil
+type ResponseInterceptor interface {
+    OnResponse(resp *http.Response) error
+}
+```
+
+### 注册拦截器
+
+在 `handleProxy` 函数中初始化 `ProxyServer` 时指定：
+
+```go
+proxy := &ProxyServer{
+    CertManager:         cm,
+    Interceptor:         &MyDNSInterceptor{},
+    RequestInterceptor:  &MyReqInterceptor{},
+    ResponseInterceptor: &MyRespInterceptor{},
 }
 ```
 
