@@ -193,13 +193,11 @@ func TestInterceptorScenarios(t *testing.T) {
 		}
 	})
 
-	// 场景 2: 跳过本地 DNS (RemoteResolve)
-	t.Run("RemoteResolve", func(t *testing.T) {
+	// 场景 2: 默认远程解析 (移除 RemoteResolve 字段测试)
+	t.Run("DefaultRemoteResolve", func(t *testing.T) {
 		interceptor := &mockInterceptor{
 			onInterceptFunc: func(ctx *InterceptContext) (*InterceptResult, error) {
-				return &InterceptResult{
-					RemoteResolve: true,
-				}, nil
+				return &InterceptResult{}, nil // 返回空结果，默认行为
 			},
 		}
 
@@ -208,8 +206,9 @@ func TestInterceptorScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !res.RemoteResolve {
-			t.Error("Expected RemoteResolve to be true")
+		// 验证逻辑已变更，无需检查 RemoteResolve 字段
+		if res.ResolveHost != "" {
+			t.Error("Expected empty ResolveHost")
 		}
 	})
 
@@ -218,9 +217,8 @@ func TestInterceptorScenarios(t *testing.T) {
 		interceptor := &mockInterceptor{
 			onInterceptFunc: func(ctx *InterceptContext) (*InterceptResult, error) {
 				return &InterceptResult{
-					ResolveHost:   "B.com",
-					UpstreamSNI:   "B.com",
-					RemoteResolve: true, // 即使开启了远程解析
+					ResolveHost: "B.com",
+					UpstreamSNI: "B.com",
 				}, nil
 			},
 		}
@@ -235,7 +233,8 @@ func TestInterceptorScenarios(t *testing.T) {
 		proxyDest := net.JoinHostPort(res.ResolveHost, ctx.TargetPort)
 		destHost := net.JoinHostPort(ctx.TargetHost, ctx.TargetPort)
 
-		if (res.ResolveHost == "" || res.ResolveHost == ctx.TargetHost) && res.RemoteResolve {
+		// 新逻辑：只要指定了 ResolveHost 且不等于 targetHost，就使用它；否则回退到 destHost
+		if res.ResolveHost == "" || res.ResolveHost == ctx.TargetHost {
 			proxyDest = destHost
 		}
 

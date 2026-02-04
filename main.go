@@ -726,9 +726,8 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// 默认结果（向后兼容）
 	interceptRes := &InterceptResult{
-		ResolveHost:   targetHost,
-		UpstreamSNI:   sni,
-		RemoteResolve: false,
+		ResolveHost: targetHost,
+		UpstreamSNI: sni,
 	}
 	if interceptRes.UpstreamSNI == "" {
 		interceptRes.UpstreamSNI = targetHost
@@ -792,11 +791,13 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 5.2 发送 CONNECT 请求建立隧道
-		proxyDest := upstreamTarget
-		// 只有在未指定自定义解析目标（ResolveHost 为空或等于原始主机名）且要求远程解析时，才透传原始域名给代理。
-		// 如果用户指定了不同的 ResolveHost，说明用户希望连接到特定的地址。
-		if (interceptRes.ResolveHost == "" || interceptRes.ResolveHost == targetHost) && interceptRes.RemoteResolve {
+		// 优先使用拦截器指定的 ResolveHost，如果未指定（为空或等于原始目标），则回退到原始 destHost
+		proxyDest := interceptRes.ResolveHost
+		if proxyDest == "" || proxyDest == targetHost {
 			proxyDest = destHost
+		} else {
+			// 如果指定了 ResolveHost，需要补上端口
+			proxyDest = net.JoinHostPort(proxyDest, targetPort)
 		}
 
 		connectReq := &http.Request{
@@ -966,9 +967,8 @@ type InterceptContext struct {
 
 // InterceptResult 包含拦截器的处理结果。
 type InterceptResult struct {
-	ResolveHost   string // 用于本地解析的域名/IP（为空表示跳过解析）
-	UpstreamSNI   string // 用于上游 TLS 握手的 SNI
-	RemoteResolve bool   // 是否由上游代理执行 DNS 解析
+	ResolveHost string // 用于本地解析的域名/IP（为空表示跳过解析）
+	UpstreamSNI string // 用于上游 TLS 握手的 SNI
 }
 
 // DNSAndSNIInterceptor 定义了可插拔的 DNS 与 SNI 拦截接口。
