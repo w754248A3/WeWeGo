@@ -38,17 +38,22 @@ func logDebug(format string, v ...interface{}) {
 	}
 }
 
-// main 是程序的入口点，负责解析子命令并分发执行逻辑。
+// main acts as the entry point of the application.
 //
-// 业务用途：
-// 提供命令行交互界面，支持 'genca' (生成证书) 和 'proxy' (启动代理) 两个核心功能。
+// Description:
+//   It parses the command-line arguments to determine which subcommand ('genca' or 'proxy') to execute.
+//   It serves as the dispatcher for the CLI tool.
 //
-// 参数说明：
-// os.Args[1] - 子命令名称
+// Parameters:
+//   None (uses os.Args directly).
 //
-// 示例：
-// wewego genca
-// wewego proxy -listen :8080
+// Return Value:
+//   None.
+//
+// Implementation Logic:
+//   1. Validates the number of command-line arguments.
+//   2. Switches on the first argument (subcommand) to invoke the corresponding handler function.
+//   3. Exits with status code 1 if the command is unknown or arguments are missing.
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: wewego <command> [arguments]")
@@ -67,20 +72,30 @@ func main() {
 	}
 }
 
-// handleGenCA 处理根证书 (CA) 的生成逻辑。
+// handleGenCA handles the generation of the Root Certificate Authority (CA).
 //
-// 核心功能：
-// 1. 生成 4096 位的 RSA 私钥。
-// 2. 创建有效期为 10 年的自签名 CA 证书。
-// 3. 将证书和私钥导出为多种标准格式 (PEM, DER, PKCS12)。
+// Description:
+//   This function generates a 4096-bit RSA private key and a self-signed CA certificate.
+//   It exports the generated key and certificate in multiple formats (PEM, DER, PKCS#12)
+//   to facilitate import into different operating systems and browsers.
 //
-// 实现思路：
-// 使用 Go 的 crypto/x509 标准库构建证书模板，设置 IsCA: true 以及相应的 KeyUsage，
-// 以确保生成的证书能被操作系统和浏览器识别为有效的受信任根。
+// Parameters:
+//   None (uses os.Args for flag parsing).
 //
-// 返回值：
-// 无。执行失败时会直接调用 os.Exit(1) 并打印错误信息。
+// Return Value:
+//   None.
+//
+// Implementation Logic:
+//   1. Parses command-line flags for the 'genca' subcommand.
+//   2. Generates a secure RSA private key (4096 bits).
+//   3. Creates a self-signed X.509 certificate template with CA properties (IsCA=true, KeyUsage).
+//   4. Exports the certificate and key to files:
+//      - ca-cert.pem: PEM encoded certificate.
+//      - ca-key.pem: PEM encoded private key.
+//      - ca.cer: DER encoded certificate (for Windows).
+//      - ca.p12: PKCS#12 archive (for browsers).
 func handleGenCA() {
+	// --- Step 1: Parse Flags ---
 	fs := flag.NewFlagSet("genca", flag.ExitOnError)
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
@@ -89,16 +104,16 @@ func handleGenCA() {
 
 	fmt.Println("Generating CA certificate and private key...")
 
-	// 1. 生成 4096 位 RSA 私钥，用于 CA 的身份标识和后续证书签发
+	// --- Step 2: Generate Private Key ---
+	// Generate a 4096-bit RSA private key for robust security.
 	priv, err := rsa.GenerateKey(rand.Reader, 4096)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to generate private key: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 2. 创建自签名的 CA 证书
-	// 生成 128 位的随机序列号，符合 RFC 5280 标准。
-	// 技术细节：使用 big.Int 的 Lsh (左移) 操作计算 2^128，作为随机数的上限。
+	// --- Step 3: Create CA Certificate Template ---
+	// Generate a random serial number (128-bit) as per RFC 5280.
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
 	if err != nil {
@@ -112,31 +127,32 @@ func handleGenCA() {
 			CommonName: "Local HTTPS Proxy CA",
 		},
 		NotBefore: time.Now(),
-		NotAfter:  time.Now().AddDate(10, 0, 0), // 证书有效期设为 10 年
+		NotAfter:  time.Now().AddDate(10, 0, 0), // Valid for 10 years
 
-		// 设置关键的使用限制
+		// Key Usage settings critical for a CA certificate
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		IsCA:                  true, // 声明此证书为 CA
-		MaxPathLen:            0,    // 限制 CA 路径长度，增强安全性
+		IsCA:                  true, // Mark as CA
+		MaxPathLen:            0,    // Limit CA path length for security
 		MaxPathLenZero:        true,
 	}
 
-	// 为证书添加 SubjectKeyIdentifier 和 AuthorityKeyIdentifier，用于建立信任链
+	// Compute Subject Key Identifier (SKI) for authority chaining
 	ski := computeSKI(priv)
 	template.SubjectKeyId = ski
 	template.AuthorityKeyId = ski
 
-	// 自签名操作：使用私钥对包含自身公钥的模板进行签名
+	// --- Step 4: Self-Sign Certificate ---
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create certificate: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 3. 导出多种格式的文件，以适配不同的操作系统和浏览器
-	// 导出为 PEM 格式的证书，通常用于 macOS/Linux
+	// --- Step 5: Export Files ---
+	
+	// Export PEM Certificate
 	certPemFile, err := os.Create("ca-cert.pem")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create ca-cert.pem: %v\n", err)
@@ -145,7 +161,7 @@ func handleGenCA() {
 	pem.Encode(certPemFile, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 	certPemFile.Close()
 
-	// 导出为 PEM 格式的私钥，设置权限为 0600 (仅所有者可读写)
+	// Export PEM Private Key
 	keyOut, err := os.OpenFile("ca-key.pem", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create ca-key.pem: %v\n", err)
@@ -159,13 +175,13 @@ func handleGenCA() {
 	pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: privBytes})
 	keyOut.Close()
 
-	// 导出为 DER 编码的 .cer 文件，通常用于 Windows 导入
+	// Export DER Certificate (Windows friendly)
 	if err := os.WriteFile("ca.cer", derBytes, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to write ca.cer: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 导出为 PKCS#12 (.p12) 格式，方便浏览器一键导入，默认密码为空
+	// Export PKCS#12 (Browser friendly)
 	cert, err := x509.ParseCertificate(derBytes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to parse certificate: %v\n", err)
@@ -181,7 +197,7 @@ func handleGenCA() {
 		os.Exit(1)
 	}
 
-	// 4. 打印指纹及后续操作指南
+	// Print Summary
 	hash := sha256.Sum256(derBytes)
 	fmt.Printf("\nCA generated successfully!\n")
 	fmt.Printf("SHA-256 Fingerprint: %s\n", hex.EncodeToString(hash[:]))
@@ -191,32 +207,54 @@ func handleGenCA() {
 	fmt.Println("- Browser: Import 'ca.p12' (empty password) or 'ca-cert.pem' into your browser's certificate manager")
 }
 
-// computeSKI 计算并返回 RSA 公钥的 Subject Key Identifier (SKI)。
+// computeSKI calculates the Subject Key Identifier (SKI) for an RSA private key.
 //
-// 算法逻辑：
-// 采用 RFC 5280 推荐的方法 1：计算公钥内容的 SHA-1 哈希值（此处为了安全性使用了 SHA-256）。
+// Description:
+//   The SKI is used to identify the public key corresponding to a private key.
+//   It is essential for building certificate chains.
 //
-// 参数：
-// priv - 指向 RSA 私钥的指针
+// Parameters:
+//   priv (*rsa.PrivateKey): The private key to compute the SKI for.
 //
-// 返回值：
-// 包含哈希值的字节切片
+// Return Value:
+//   ([]byte): The SHA-256 hash of the marshaled public key.
+//
+// Implementation Logic:
+//   1. Marshal the public key part of the private key to PKCS#1 format.
+//   2. Compute the SHA-256 hash of the marshaled bytes.
+//   3. Return the hash slice.
 func computeSKI(priv *rsa.PrivateKey) []byte {
 	pubBytes := x509.MarshalPKCS1PublicKey(&priv.PublicKey)
 	hash := sha256.Sum256(pubBytes)
 	return hash[:]
 }
 
-// handleProxy 处理代理服务器的启动逻辑。
+// handleProxy starts and manages the HTTPS proxy server.
 //
-// 核心功能：
-// 1. 解析命令行参数（监听地址、证书路径等）。
-// 2. 加载根证书并初始化证书管理器。
-// 3. 配置 HTTP 代理服务器并实现优雅退出。
+// Description:
+//   This is the main entry point for the 'proxy' subcommand. It initializes the
+//   proxy server components, including the Certificate Authority, Certificate Manager,
+//   Request/Response Interceptors, and the HTTP/TCP listeners. It also handles
+//   graceful shutdown on system signals.
 //
-// 异常处理：
-// 如果 CA 文件不存在或加载失败，程序将记录 Fatal 错误并退出。
+// Parameters:
+//   None (uses os.Args for flag parsing).
+//
+// Return Value:
+//   None.
+//
+// Implementation Logic:
+//   1. Parse command-line arguments (listen address, CA paths, upstream proxy/host).
+//   2. Validate upstream host configuration.
+//   3. Load the CA certificate and key for MITM operations.
+//   4. Initialize the CertManager with an LRU cache.
+//   5. Configure the HTTP Transport with HTTP/2 support and upstream proxy settings.
+//   6. Initialize the DemoInterceptor for request/response modification.
+//   7. Set up the ProxyServer handler and the http.Server.
+//   8. Start a goroutine for signal handling to support graceful shutdown.
+//   9. Start the server and listen for incoming connections.
 func handleProxy() {
+	// --- Step 1: Parse and Validate Flags ---
 	caCertPath := flag.String("cacert", "ca-cert.pem", "Path to CA certificate")
 	caKeyPath := flag.String("cakey", "ca-key.pem", "Path to CA private key")
 	listenAddr := flag.String("listen", "127.0.0.1:8443", "Listen address")
@@ -226,16 +264,11 @@ func handleProxy() {
 
 	flag.CommandLine.Parse(os.Args[2:])
 
-	// 验证上游主机是否指定
-
-	
 	if *upstreamHostUrlStr == "" {
 		log.Fatalf("Upstream host is required")
 	}
 
 	var err error
-	
-	// 验证上游 URL 是否有效
 	if _, err = url.Parse(*upstreamHostUrlStr); err != nil {
 		log.Fatalf("Invalid upstream host URL: %v", err)
 	}
@@ -247,7 +280,7 @@ func handleProxy() {
 		if err != nil {
 			log.Fatalf("Invalid upstream proxy URL: %v", err)
 		}
-		// 补全默认端口
+		// Ensure default port if missing
 		if upstreamProxyURL.Port() == "" {
 			if upstreamProxyURL.Scheme == "https" {
 				upstreamProxyURL.Host = net.JoinHostPort(upstreamProxyURL.Hostname(), "443")
@@ -257,7 +290,7 @@ func handleProxy() {
 		}
 	}
 
-	// 加载 CA 证书对，用于动态签发子证书
+	// --- Step 2: Load CA and Initialize CertManager ---
 	ca, err := loadCA(*caCertPath, *caKeyPath)
 	if err != nil {
 		log.Fatalf("Failed to load CA: %v", err)
@@ -265,7 +298,7 @@ func handleProxy() {
 
 	cm := NewCertManager(ca, *cacheSize)
 
-	
+	// --- Step 3: Configure Transport and Interceptors ---
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -274,17 +307,15 @@ func handleProxy() {
 		ForceAttemptHTTP2: true,
 	}
 
-	// 如果指定了上游代理，则配置 Transport 使用该代理
 	if upstreamProxyURL != nil {
 		transport.Proxy = http.ProxyURL(upstreamProxyURL)
 	} else {
-		// 显式禁用系统代理，确保上游连接为直接连接
-		transport.Proxy = nil
+		transport.Proxy = nil // Direct connection
 	}
 
-    // 实例化拦截器
 	demo := NewDemoInterceptor(*upstreamHostUrlStr)
 
+	// --- Step 4: Initialize ProxyServer ---
 	proxy := &ProxyServer{
 		CertManager:         cm,
 		UpstreamProxy:       upstreamProxyURL,
@@ -292,7 +323,7 @@ func handleProxy() {
 		ResponseInterceptor: demo,
 		Client: &http.Client{
 			Transport: transport,
-			// 默认不跟随重定向，将重定向响应透传给客户端
+			// Do not follow redirects automatically; let the client handle them.
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -304,14 +335,13 @@ func handleProxy() {
 		Handler: proxy,
 	}
 
-	// 优雅退出处理逻辑
+	// --- Step 5: Setup Graceful Shutdown ---
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		sig := <-sigChan
 		logDebug("Received signal %v, shutting down...", sig)
 
-		// 给现有连接 5 秒的处理宽限期
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(ctx); err != nil {
@@ -319,6 +349,7 @@ func handleProxy() {
 		}
 	}()
 
+	// --- Step 6: Start Server ---
 	logDebug("Starting proxy on %s", *listenAddr)
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("ListenAndServe error: %v", err)
@@ -327,28 +358,42 @@ func handleProxy() {
 
 // --- CertManager & LRU Cache ---
 
-// CertManager 负责管理和生成用于中间人攻击 (MITM) 的服务器证书。
+// CertManager manages the dynamic generation and caching of TLS certificates.
 //
-// 架构角色：
-// 作为证书中心，它利用根证书 (CA) 为目标域名动态签发临时证书，并使用 LRU 缓存提高复用效率。
+// Description:
+//   It acts as an intermediate Certificate Authority (MITM CA), generating
+//   certificates on-the-fly for intercepted domains. It employs an LRU cache
+//   to minimize the overhead of key generation and signing.
 //
-// 线程安全性：
-// 该结构体是线程安全的，内部使用 sync.Mutex 保护缓存访问与证书签发逻辑。
+// Fields:
+//   caCert: The root CA certificate used for signing.
+//   caPrivKey: The private key of the root CA.
+//   cache: An LRU cache storing generated certificates.
+//   mu: Mutex for thread-safe access to the cache.
 type CertManager struct {
-	caCert    *x509.Certificate // 根证书对象
-	caPrivKey interface{}       // 根证书私钥
-	cache     *LRUCache         // 证书 LRU 缓存
-	mu        sync.Mutex        // 保护缓存与签发逻辑的互斥锁
+	caCert    *x509.Certificate
+	caPrivKey interface{}
+	cache     *LRUCache
+	mu        sync.Mutex
 }
 
-// NewCertManager 创建并初始化一个新的 CertManager。
+// NewCertManager creates and initializes a new CertManager instance.
 //
-// 参数：
-// ca - 已加载的 CA 证书对
-// cacheSize - 缓存中允许保留的最大证书数量
+// Description:
+//   Initializes the CertManager with the provided CA certificate and a configured
+//   LRU cache size.
 //
-// 返回值：
-// 指向初始化后的 CertManager 实例
+// Parameters:
+//   ca (tls.Certificate): The loaded CA certificate pair.
+//   cacheSize (int): The maximum number of certificates to hold in memory.
+//
+// Return Value:
+//   (*CertManager): A pointer to the initialized CertManager.
+//
+// Implementation Logic:
+//   1. Parse the x509 leaf certificate from the tls.Certificate.
+//   2. Initialize the LRUCache.
+//   3. Return the struct.
 func NewCertManager(ca tls.Certificate, cacheSize int) *CertManager {
 	cert, _ := x509.ParseCertificate(ca.Certificate[0])
 	return &CertManager{
@@ -358,31 +403,43 @@ func NewCertManager(ca tls.Certificate, cacheSize int) *CertManager {
 	}
 }
 
-// loadCA 从指定的文件路径加载 CA 证书和私钥。
+// loadCA loads the CA certificate and private key from the filesystem.
 //
-// 参数：
-// certPath - CA 证书 PEM 文件路径
-// keyPath - CA 私钥 PEM 文件路径
+// Description:
+//   Reads the PEM encoded certificate and key files and parses them into a
+//   tls.Certificate object.
 //
-// 返回值：
-// tls.Certificate - 加载后的证书对
-// error - 加载失败时的错误信息
+// Parameters:
+//   certPath (string): Path to the CA certificate file.
+//   keyPath (string): Path to the CA private key file.
+//
+// Return Value:
+//   (tls.Certificate): The parsed certificate pair.
+//   (error): Error object if loading fails.
 func loadCA(certPath, keyPath string) (tls.Certificate, error) {
 	return tls.LoadX509KeyPair(certPath, keyPath)
 }
 
-// GetCertificate 获取指定域名的 TLS 证书。
+// GetCertificate retrieves or generates a certificate for the given domain.
 //
-// 实现逻辑：
-// 1. 首先尝试从缓存中获取。
-// 2. 若缓存未命中，则调用 generateServerCert 动态签发新证书并存入缓存。
+// Description:
+//   This is the core method for obtaining a server certificate during the TLS handshake.
+//   It first checks the in-memory cache. If missing, it generates a new one.
 //
-// 参数：
-// domain - 目标域名（如 "google.com"）
+// Parameters:
+//   domain (string): The target domain name (SNI).
 //
-// 返回值：
-// *tls.Certificate - 可用于 TLS 握手的证书指针
-// error - 签发过程中的异常情况
+// Return Value:
+//   (*tls.Certificate): The certificate to use for the handshake.
+//   (error): Error if generation fails.
+//
+// Implementation Logic:
+//   1. Check LRU cache (thread-safe). If found, return immediately.
+//   2. If not found, call generateServerCert to create a new one.
+//      (Note: There is a potential optimization point here using singleflight to prevent
+//       duplicate work on concurrent requests for the same domain).
+//   3. Store the new certificate in the cache.
+//   4. Return the certificate.
 func (cm *CertManager) GetCertificate(domain string) (*tls.Certificate, error) {
 	cm.mu.Lock()
 	if cert, ok := cm.cache.Get(domain); ok {
@@ -391,11 +448,8 @@ func (cm *CertManager) GetCertificate(domain string) (*tls.Certificate, error) {
 	}
 	cm.mu.Unlock()
 
-	// 缓存未命中，执行动态签发
-	// TODO: 优化并发性能 (Thundering Herd 问题)
-	// 当前实现在高并发场景下，若多个请求同时访问同一个未缓存的域名，
-	// 会导致多次重复签发证书。建议引入 singleflight 模式，
-	// 确保同一时刻针对同一域名只进行一次签发操作。
+	// Cache miss: Generate new certificate
+	// TODO: Implement singleflight to avoid Thundering Herd problem on concurrent misses.
 	cert, err := cm.generateServerCert(domain)
 	if err != nil {
 		return nil, err
@@ -408,18 +462,30 @@ func (cm *CertManager) GetCertificate(domain string) (*tls.Certificate, error) {
 	return cert, nil
 }
 
-// generateServerCert 为特定域名动态签发被 CA 信任的服务器证书。
+// generateServerCert creates a new leaf certificate for a specific domain.
 //
-// 关键算法：
-// 1. 生成 2048 位的临时 RSA 私钥。
-// 2. 构造证书模板，包含通配符域名 (Wildcard) 以增强兼容性。
-// 3. 使用 CA 私钥对模板进行签名。
+// Description:
+//   Generates a 2048-bit RSA key pair and creates a certificate signed by the
+//   internal CA. It supports wildcard domains to reduce the number of generated certs.
 //
-// 参数：
-// domain - 需要签发的域名
+// Parameters:
+//   domain (string): The domain name to generate the certificate for.
 //
-// 返回值：
-// *tls.Certificate - 签发成功的证书对象
+// Return Value:
+//   (*tls.Certificate): The generated certificate pair.
+//   (error): Error if any step fails.
+//
+// Implementation Logic:
+//   1. Generate a temporary 2048-bit RSA key.
+//   2. Determine if a wildcard domain (e.g., *.example.com) should be used based on the domain depth.
+//   3. Create a certificate template with:
+//      - Unique serial number.
+//      - Validity period (7 days).
+//      - KeyUsage (DigitalSignature, KeyEncipherment).
+//      - ExtKeyUsage (ServerAuth).
+//      - DNSNames (SANs) including the domain and optional wildcard.
+//   4. Sign the template using the CA's private key.
+//   5. Return the tls.Certificate.
 func (cm *CertManager) generateServerCert(domain string) (*tls.Certificate, error) {
 	logDebug("Generating cert for %s", domain)
 
@@ -431,10 +497,8 @@ func (cm *CertManager) generateServerCert(domain string) (*tls.Certificate, erro
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, _ := rand.Int(rand.Reader, serialNumberLimit)
 
-	// 确定通配符域名逻辑：
-	// 算法逻辑：将域名按点号分割，若层级大于等于 2（如 a.b.com），
-	// 则提取最后两段（b.com）构造通配符（*.b.com）和基础域名（b.com）。
-	// 这样可以使一个证书覆盖同一二级域名下的多个三级域名，显著减少签发压力。
+	// Wildcard Logic:
+	// If domain is "a.b.com", we try to generate for "*.b.com" to cover all subdomains.
 	parts := strings.Split(domain, ".")
 	wildcard := ""
 	baseDomain := ""
@@ -448,8 +512,8 @@ func (cm *CertManager) generateServerCert(domain string) (*tls.Certificate, erro
 		Subject: pkix.Name{
 			CommonName: domain,
 		},
-		NotBefore: time.Now().Add(-time.Hour), // 提前一小时以兼容时钟偏差
-		NotAfter:  time.Now().AddDate(0, 0, 7), // 有效期 7 天，平衡安全性与复用性
+		NotBefore: time.Now().Add(-time.Hour), // Allow for clock skew
+		NotAfter:  time.Now().AddDate(0, 0, 7), // Short validity (7 days)
 
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
@@ -461,7 +525,6 @@ func (cm *CertManager) generateServerCert(domain string) (*tls.Certificate, erro
 		template.DNSNames = append(template.DNSNames, wildcard, baseDomain)
 	}
 
-	// 使用 CA 证书和 CA 私钥进行签名
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, cm.caCert, &priv.PublicKey, cm.caPrivKey)
 	if err != nil {
 		return nil, err
@@ -473,24 +536,30 @@ func (cm *CertManager) generateServerCert(domain string) (*tls.Certificate, erro
 	}, nil
 }
 
-// LRUCache 实现了一个固定大小的最近最少使用 (LRU) 缓存。
+// LRUCache implements a Least Recently Used (LRU) cache with fixed size.
 //
-// 实现思路：
-// 使用双向链表 (list.List) 维护访问顺序，使用 Map (map) 实现 O(1) 的查找。
-// 每次访问或添加元素时，将其移至链表头部；当容量溢出时，移除链表尾部的旧元素。
+// Description:
+//   Uses a combination of a doubly linked list and a hash map to provide O(1) access
+//   and eviction.
 type LRUCache struct {
-	size int                      // 缓存最大容量
-	ll   *list.List               // 存储 cacheItem 的双向链表
-	data map[string]*list.Element // 快速索引 Map
+	size int                      // Maximum capacity
+	ll   *list.List               // Doubly linked list for order
+	data map[string]*list.Element // Map for fast lookup
 }
 
-// cacheItem 存储在 LRU 链表中的实际数据项。
+// cacheItem represents a single entry in the LRU cache.
 type cacheItem struct {
-	key  string           // 缓存键（域名）
-	cert *tls.Certificate // 缓存值（TLS 证书）
+	key  string           // Domain name
+	cert *tls.Certificate // Certificate
 }
 
-// NewLRUCache 创建一个新的 LRUCache 实例。
+// NewLRUCache initializes a new LRUCache.
+//
+// Parameters:
+//   size (int): The maximum number of items.
+//
+// Return Value:
+//   (*LRUCache): The initialized cache.
 func NewLRUCache(size int) *LRUCache {
 	return &LRUCache{
 		size: size,
@@ -499,16 +568,35 @@ func NewLRUCache(size int) *LRUCache {
 	}
 }
 
-// Get 从缓存中获取证书，并将其标记为最近使用。
+// Get retrieves an item from the cache.
+//
+// Parameters:
+//   key (string): The lookup key (domain).
+//
+// Return Value:
+//   (*tls.Certificate): The value if found.
+//   (bool): True if found, false otherwise.
+//
+// Implementation Logic:
+//   If found, moves the element to the front of the list (mark as recently used) and returns it.
 func (c *LRUCache) Get(key string) (*tls.Certificate, bool) {
 	if ele, ok := c.data[key]; ok {
-		c.ll.MoveToFront(ele) // 命中后移至头部
+		c.ll.MoveToFront(ele)
 		return ele.Value.(*cacheItem).cert, true
 	}
 	return nil, false
 }
 
-// Add 向缓存中添加或更新证书。
+// Add inserts or updates an item in the cache.
+//
+// Parameters:
+//   key (string): The domain key.
+//   cert (*tls.Certificate): The certificate to store.
+//
+// Implementation Logic:
+//   1. If key exists, update value and move to front.
+//   2. If key is new, push to front.
+//   3. If size exceeds capacity, remove the oldest item (back of list).
 func (c *LRUCache) Add(key string, cert *tls.Certificate) {
 	if ele, ok := c.data[key]; ok {
 		c.ll.MoveToFront(ele)
@@ -518,11 +606,14 @@ func (c *LRUCache) Add(key string, cert *tls.Certificate) {
 	ele := c.ll.PushFront(&cacheItem{key, cert})
 	c.data[key] = ele
 	if c.ll.Len() > c.size {
-		c.removeOldest() // 容量溢出时剔除
+		c.removeOldest()
 	}
 }
 
-// removeOldest 移除缓存中最近最少使用的项。
+// removeOldest removes the least recently used item.
+//
+// Implementation Logic:
+//   Removes the element from the back of the list and deletes it from the map.
 func (c *LRUCache) removeOldest() {
 	ele := c.ll.Back()
 	if ele != nil {
@@ -533,19 +624,24 @@ func (c *LRUCache) removeOldest() {
 
 // --- Proxy Server ---
 
-// ProxyServer 是 HTTPS 代理的核心服务器结构。
+// ProxyServer is the core HTTP handler for the proxy.
 //
-// 设计模式：
-// 实现 http.Handler 接口，作为代理逻辑的调度器。
+// Description:
+//   It implements http.Handler and routes requests based on the method (CONNECT vs others).
+//   It holds references to the CertManager, Client, and Interceptors.
 type ProxyServer struct {
-	CertManager         *CertManager         // 证书管理器，用于 MITM
-	Client              *http.Client         // 用于向上游服务器发起请求的客户端
-	UpstreamProxy       *url.URL             // 可选的上游代理服务器
-	RequestInterceptor  RequestInterceptor   // 请求拦截器
-	ResponseInterceptor ResponseInterceptor  // 响应拦截器
+	CertManager         *CertManager
+	Client              *http.Client
+	UpstreamProxy       *url.URL
+	RequestInterceptor  RequestInterceptor
+	ResponseInterceptor ResponseInterceptor
 }
 
-// bufferedConn 用于包装 net.Conn 并处理 bufio.Reader 中的缓冲数据。
+// bufferedConn wraps a net.Conn with a bufio.Reader.
+//
+// Description:
+//   This is used to read initial bytes (peek) without consuming them from the socket,
+//   allowing the subsequent logic to read the same bytes again.
 type bufferedConn struct {
 	net.Conn
 	r io.Reader
@@ -555,11 +651,23 @@ func (b *bufferedConn) Read(p []byte) (int, error) {
 	return b.r.Read(p)
 }
 
-// peekSNI 预读 ClientHello 以提取 SNI，且不破坏原始连接。
+// peekSNI reads the start of the connection to extract the SNI extension.
+//
+// Description:
+//   It peeks at the first few bytes of the TLS ClientHello handshake message
+//   to determine the Server Name Indication (SNI) without consuming the stream.
+//
+// Parameters:
+//   conn (net.Conn): The raw TCP connection.
+//
+// Return Value:
+//   (string): The extracted SNI hostname, or empty if not found.
+//   (net.Conn): A wrapper connection that includes the peeked bytes.
+//   (error): Read error if any.
 func peekSNI(conn net.Conn) (string, net.Conn, error) {
 	br := bufio.NewReader(conn)
 
-	// TLS 记录头 5 字节，ClientHello 通常前 1024 字节足够
+	// Peek enough bytes to cover most ClientHello headers (1024 bytes is usually sufficient)
 	data, err := br.Peek(1024)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return "", &bufferedConn{Conn: conn, r: br}, err
@@ -569,51 +677,60 @@ func peekSNI(conn net.Conn) (string, net.Conn, error) {
 	return sni, &bufferedConn{Conn: conn, r: br}, nil
 }
 
-// parseSNI 解析 TLS ClientHello 字节流中的 SNI 扩展。
+// parseSNI parses the TLS ClientHello packet to find the SNI.
+//
+// Description:
+//   Iterates through the TLS record and handshake protocol to find the Server Name extension.
+//
+// Parameters:
+//   data ([]byte): The raw bytes of the ClientHello.
+//
+// Return Value:
+//   (string): The SNI hostname.
 func parseSNI(data []byte) string {
 	if len(data) < 43 {
 		return ""
 	}
 
-	// 检查是否为 TLS Handshake (0x16)
+	// 0x16 = Handshake Record
 	if data[0] != 0x16 {
 		return ""
 	}
 
-	pos := 5 // 跳过 Record Header
+	pos := 5 // Skip Record Header (5 bytes)
 	if len(data) < pos+4 {
 		return ""
 	}
 
-	// Handshake Type 必须是 Client Hello (0x01)
+	// 0x01 = Client Hello
 	if data[pos] != 0x01 {
 		return ""
 	}
 
-	pos += 38 // 跳过 Handshake Header, Version, Random
+	pos += 38 // Skip Handshake Header(4), Version(2), Random(32)
 
-	// Session ID
+	// Skip Session ID
 	if pos >= len(data) {
 		return ""
 	}
 	sessionIDLen := int(data[pos])
 	pos += 1 + sessionIDLen
 
-	// Cipher Suites
+	// Skip Cipher Suites
 	if pos+1 >= len(data) {
 		return ""
 	}
 	cipherSuiteLen := int(data[pos])<<8 | int(data[pos+1])
 	pos += 2 + cipherSuiteLen
 
-	// Compression Methods
+	// Skip Compression Methods
 	if pos >= len(data) {
 		return ""
 	}
 	compressionLen := int(data[pos])
 	pos += 1 + compressionLen
 
-	// Extensions
+	// Parse Extensions
 	if pos+1 >= len(data) {
 		return ""
 	}
@@ -630,12 +747,12 @@ func parseSNI(data []byte) string {
 		extLen := int(data[pos+2])<<8 | int(data[pos+3])
 		pos += 4
 
-		if extType == 0x00 { // SNI extension type
+		if extType == 0x00 { // 0x00 is SNI extension
 			if pos+2 >= end {
 				return ""
 			}
-			pos += 2 // Server Name List Length
-			if pos < end && data[pos] == 0x00 {
+			pos += 2 // Skip Server Name List Length
+			if pos < end && data[pos] == 0x00 { // Name Type: Host Name (0)
 				pos++
 				if pos+1 >= end {
 					return ""
@@ -653,16 +770,20 @@ func parseSNI(data []byte) string {
 	return ""
 }
 
-// ServeHTTP 处理所有传入的代理请求。
+// ServeHTTP implements the http.Handler interface.
 //
-// 业务逻辑：
-// 1. 识别 CONNECT 方法（HTTPS 隧道请求），调用 handleConnect 处理。
-// 2. 识别普通 HTTP 请求，强制重定向至 HTTPS。
+// Description:
+//   Dispatches requests. HTTPS requests (CONNECT) are handled by handleConnect.
+//   Plain HTTP requests are redirected to HTTPS to enforce security.
+//
+// Parameters:
+//   w (http.ResponseWriter): The response writer.
+//   r (*http.Request): The incoming request.
 func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		p.handleConnect(w, r)
 	} else {
-		// 强制 HTTPS 跳转策略
+		// Enforce HTTPS: Redirect plain HTTP to HTTPS
 		if r.URL.Scheme == "http" || r.TLS == nil {
 			target := "https://" + r.Host + r.URL.Path
 			if r.URL.RawQuery != "" {
@@ -675,13 +796,23 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleConnect 处理 HTTPS 代理的隧道建立过程。
+// handleConnect establishes the HTTPS tunnel and performs MITM interception.
 //
-// 实现步骤：
-// 1. 劫持 (Hijack) 客户端连接，脱离标准 HTTP Server 逻辑。
-// 2. 返回 200 Connection Established 告知客户端隧道已就绪。
-// 3. 动态获取目标域名的证书，与客户端进行 MITM TLS 握手。
-// 4. 使用 http.Server 处理握手后的连接，支持 HTTP/1.1 和 HTTP/2。
+// Description:
+//   Hijacks the client TCP connection, pretends to be the upstream server (TLS Handshake),
+//   and then proxies the decrypted HTTP traffic.
+//
+// Parameters:
+//   w (http.ResponseWriter): Response writer.
+//   r (*http.Request): The CONNECT request.
+//
+// Implementation Logic:
+//   1. Hijack the connection from the HTTP server.
+//   2. Send "200 Connection Established" to the client.
+//   3. Peek the SNI from the client's ClientHello.
+//   4. Generate/Get a certificate for the SNI (or target host).
+//   5. Perform TLS handshake with the client (as the server).
+//   6. Launch an internal HTTP server (TunnelHandler) over this TLS connection to handle the actual requests.
 func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	destHost := r.URL.Host
 	targetHost, targetPort, _ := net.SplitHostPort(destHost)
@@ -698,29 +829,27 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. 劫持底层 TCP 连接
+	// --- Step 1: Hijack Connection ---
 	rawClientConn, _, err := hijacker.Hijack()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 
-	// 2. 响应客户端 CONNECT 请求
+	// --- Step 2: Respond 200 OK ---
 	_, err = rawClientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	if err != nil {
 		rawClientConn.Close()
 		return
 	}
 
-	// 3. 嗅探 SNI 并调用拦截器
+	// --- Step 3: Peek SNI ---
 	sni, clientConn, err := peekSNI(rawClientConn)
 	if err != nil {
 		log.Printf("Failed to peek SNI for %s: %v", targetHost, err)
-		// 即使失败也继续，不中断连接。
 	}
 
-	// 4. 执行中间人 (MitM) TLS 握手
-	// 注意：证书应匹配客户端期望的域名 (SNI 或 CONNECT Host)
+	// --- Step 4: Prepare Certificate and TLS ---
 	certHost := sni
 	if certHost == "" {
 		certHost = targetHost
@@ -735,35 +864,28 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{*cert},
 		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{"h2", "http/1.1"}, // 启用 HTTP/2 支持
+		NextProtos:   []string{"h2", "http/1.1"}, // Support H2
 	}
 
-	// 作为服务器与客户端握手
+	// --- Step 5: TLS Handshake ---
 	tlsClientConn := tls.Server(clientConn, tlsConfig)
 	if err := tlsClientConn.Handshake(); err != nil {
 		logDebug("TLS handshake failed with client for %s: %v", certHost, err)
 		tlsClientConn.Close()
 		return
 	}
-	// 注意：连接关闭由 http.Server 管理，此处不需要 defer Close，
-	// 除非 Serve 返回错误且未关闭连接。但在 SingleConnListener 中，
-	// 我们将连接传递给 Server，Server 负责关闭它。
 
-	// 5. 使用 http.Server 处理 HTTP/1.1 和 HTTP/2 请求
-	// 创建一个 TunnelHandler，它将请求转发到上游
+	// --- Step 6: Start Inner HTTP Server ---
 	tunnelHandler := &TunnelHandler{
 		proxy:       p,
-		targetHost:  targetHost, // 原始目标主机
+		targetHost:  targetHost,
 		targetPort:  targetPort,
 	}
 
-	// 创建一个单连接 Listener
 	listener := &SingleConnListener{
 		conn: tlsClientConn,
 	}
 
-	// 启动内部 Server
-	// Server 会自动协商 H1/H2
 	innerServer := &http.Server{
 		Handler: tunnelHandler,
 	}
@@ -771,8 +893,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	logDebug("MitM Session started for %s (SNI: %s, Proto: %s)", targetHost, sni, tlsClientConn.ConnectionState().NegotiatedProtocol)
 	
 	if err := innerServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-		// ErrServerClosed 是正常退出（如果调用了 Shutdown，但这里通常是连接关闭）
-		// 如果是 listener 关闭导致的错误，通常可以忽略
+		// Ignore "use of closed network connection" errors as they are expected on shutdown
 		if !strings.Contains(err.Error(), "use of closed network connection") {
 			logDebug("Inner server error for %s: %v", targetHost, err)
 		}
@@ -781,41 +902,58 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	logDebug("MitM Session closed for %s", targetHost)
 }
 
-// handleHTTP 处理普通的 HTTP 请求。
+// handleHTTP handles plain HTTP requests (not currently supported/used).
+//
+// Description:
+//   Since we force HTTPS, this handler simply returns an error or redirect.
+//   However, if ServeHTTP logic allows, this would handle plain HTTP proxying.
 func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Plain HTTP not supported, use HTTPS", http.StatusForbidden)
 }
 
 // --- New Types for HTTP/2 Support ---
 
-// TunnelHandler 处理隧道内的 HTTP 请求，将其转发到上游。
+// TunnelHandler handles the decrypted HTTP requests within the TLS tunnel.
+//
+// Description:
+//   Receives requests from the internal HTTP server (after TLS termination),
+//   intercepts them, forwards them to the upstream, and returns the response.
 type TunnelHandler struct {
 	proxy       *ProxyServer
 	targetHost  string
 	targetPort  string
 }
 
+// ServeHTTP processes individual requests inside the tunnel.
+//
+// Parameters:
+//   w (http.ResponseWriter): Response writer.
+//   r (*http.Request): Incoming request.
+//
+// Implementation Logic:
+//   1. Reconstruct the absolute URL for the request.
+//   2. Invoke RequestInterceptor.
+//   3. Handle GET/HEAD requests with body issues (explicitly clear body).
+//   4. Forward the request using the ProxyServer's Client.
+//   5. Invoke ResponseInterceptor.
+//   6. Copy response headers and body back to the client.
 func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// 1. 重建请求 URL
-	// r.URL 在 Server 接收时通常是相对路径 (H1) 或绝对路径 (H2)
-	// 我们需要确保它是绝对路径以便 Client.Do 使用
+	// --- Step 1: Reconstruct URL ---
 	if r.URL.Scheme == "" {
 		r.URL.Scheme = "https"
 	}
 	if r.URL.Host == "" {
 		r.URL.Host = r.Host
 		if r.URL.Host == "" {
-			// 如果 Header 中也没有 Host，回退到 targetHost
 			r.URL.Host = net.JoinHostPort(h.targetHost, h.targetPort)
 		}
 	}
 	
-	// 清理 RequestURI (Client.Do 不允许设置)
-	r.RequestURI = ""
+	r.RequestURI = "" // Must be empty for Client.Do
 	
 	logDebug("[%s] Request received: %s %s", h.targetHost, r.Method, r.URL.String())
 
-	// 2. 应用请求拦截器
+	// --- Step 2: Request Interception ---
 	if h.proxy.RequestInterceptor != nil {
 		if err := h.proxy.RequestInterceptor.OnRequest(r); err != nil {
 			logDebug("[%s] Request intercepted error: %v", h.targetHost, err)
@@ -824,15 +962,9 @@ func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	logDebug("[%s] Request received: %s %s", h.targetHost, r.Method, r.URL.String())
-	// 3. 转发请求
-	// 注意：p.Client 已配置 Transport (含 H2 支持)
-	// 我们可能需要调整 SNI。http.Transport 默认使用 URL.Host 作为 SNI。
-	// 如果需要强制使用 UpstreamSNI，可能需要自定义 Transport 或 Context。
-	// 但通常 URL.Host 就是正确的 SNI。
 
-	// Fix: 对于 GET 和 HEAD 请求，必须显式清空 Body，否则 http.Transport 会认为有 Body 并尝试发送，
-	// 导致上游服务器报错 "Request with a GET or HEAD method cannot have a body"。
-	// http.Server 传入的 Request.Body 即使为空也是一个非 nil 的 Reader。
+	// --- Step 3: Forward Request ---
+	// Important: GET and HEAD requests must not have a body.
 	if r.Method == "GET" || r.Method == "HEAD" {
 		r.Body = nil
 		r.ContentLength = 0
@@ -848,7 +980,7 @@ func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	logDebug("[%s] Response received: %s", h.targetHost, resp.Status)
 
-	// 4. 应用响应拦截器
+	// --- Step 4: Response Interception ---
 	if h.proxy.ResponseInterceptor != nil {
 		if err := h.proxy.ResponseInterceptor.OnResponse(resp); err != nil {
 			logDebug("[%s] Response intercepted error: %v", h.targetHost, err)
@@ -857,12 +989,17 @@ func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 5. 写回响应
+	// --- Step 5: Write Response ---
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
 
+// copyHeader copies HTTP headers from source to destination.
+//
+// Parameters:
+//   dst (http.Header): Destination headers.
+//   src (http.Header): Source headers.
 func copyHeader(dst, src http.Header) {
 	for k, vv := range src {
 		for _, v := range vv {
@@ -871,45 +1008,52 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
-// SingleConnListener 将单个 net.Conn 适配为 net.Listener。
-// 用于让 http.Server 服务于一个已经建立的连接。
+// SingleConnListener adapts a single net.Conn to the net.Listener interface.
+//
+// Description:
+//   This allows an http.Server to serve a single pre-established connection
+//   and then stop. It is used for the inner HTTP server in the MITM tunnel.
 type SingleConnListener struct {
 	conn net.Conn
 	mu   sync.Mutex
 	done bool
 }
 
+// Accept returns the connection once, then closes.
+//
+// Return Value:
+//   (net.Conn): The connection (first call).
+//   (error): net.ErrClosed (subsequent calls).
 func (l *SingleConnListener) Accept() (net.Conn, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.done {
-		// 阻塞直到 Close 被调用，或者直接返回 Closed。
-		// http.Server 在 Accept 返回错误时会停止。
-		// 为了防止 Server 自旋，这里应该只返回一次 Conn，第二次返回 Error。
 		return nil, net.ErrClosed
 	}
 	l.done = true
 	return l.conn, nil
 }
 
+// Close is a no-op for this listener as it doesn't own a listening socket.
 func (l *SingleConnListener) Close() error {
 	return nil
 }
 
+// Addr returns the local address of the connection.
 func (l *SingleConnListener) Addr() net.Addr {
 	return l.conn.LocalAddr()
 }
 
 // --- Filters & Interceptors ---
 
-// RequestInterceptor 定义了请求拦截器接口。
+// RequestInterceptor defines the interface for modifying requests.
 type RequestInterceptor interface {
-	// OnRequest 在请求发送给上游前调用。
-	// 注意：若要修改 Host 头，请直接修改 req.Host 字段，而非 req.Header。
+	// OnRequest is called before the request is forwarded to the upstream.
 	OnRequest(req *http.Request) error
 }
 
-// ResponseInterceptor 定义了响应拦截器接口。
+// ResponseInterceptor defines the interface for modifying responses.
 type ResponseInterceptor interface {
+	// OnResponse is called after receiving the response from the upstream.
 	OnResponse(resp *http.Response) error
 }
