@@ -221,30 +221,38 @@ func handleProxy() {
 	caKeyPath := flag.String("cakey", "ca-key.pem", "Path to CA private key")
 	listenAddr := flag.String("listen", "127.0.0.1:8443", "Listen address")
 	cacheSize := flag.Int("certCacheSize", 200, "Size of the certificate cache")
-	upstreamStr := flag.String("upstream", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
-	upstreamHost := flag.String("upstreamHost", "", "Upstream proxy host (e.g. 127.0.0.1)")
-	pathReplace := flag.String("pathReplace", "/", "Replace path in request (e.g. /new-path)")
-	
+	upstreamProxyStr := flag.String("upstreamProxyUrl", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
+	upstreamHostUrlStr := flag.String("upstreamHostUrl", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
+
 	flag.CommandLine.Parse(os.Args[2:])
 
 	// 验证上游主机是否指定
-	if *upstreamHost == "" {
-		log.Fatalf("Upstream proxy host is required")
+
+	
+	if *upstreamHostUrlStr == "" {
+		log.Fatalf("Upstream host is required")
 	}
 
-	var upstreamURL *url.URL
-	if *upstreamStr != "" {
+	var err error
+	
+	// 验证上游 URL 是否有效
+	if _, err = url.Parse(*upstreamHostUrlStr); err != nil {
+		log.Fatalf("Invalid upstream host URL: %v", err)
+	}
+
+	var upstreamProxyURL *url.URL
+	if *upstreamProxyStr != "" {
 		var err error
-		upstreamURL, err = url.Parse(*upstreamStr)
+		upstreamProxyURL, err = url.Parse(*upstreamProxyStr)
 		if err != nil {
 			log.Fatalf("Invalid upstream proxy URL: %v", err)
 		}
 		// 补全默认端口
-		if upstreamURL.Port() == "" {
-			if upstreamURL.Scheme == "https" {
-				upstreamURL.Host = net.JoinHostPort(upstreamURL.Hostname(), "443")
+		if upstreamProxyURL.Port() == "" {
+			if upstreamProxyURL.Scheme == "https" {
+				upstreamProxyURL.Host = net.JoinHostPort(upstreamProxyURL.Hostname(), "443")
 			} else {
-				upstreamURL.Host = net.JoinHostPort(upstreamURL.Hostname(), "80")
+				upstreamProxyURL.Host = net.JoinHostPort(upstreamProxyURL.Hostname(), "80")
 			}
 		}
 	}
@@ -267,19 +275,19 @@ func handleProxy() {
 	}
 
 	// 如果指定了上游代理，则配置 Transport 使用该代理
-	if upstreamURL != nil {
-		transport.Proxy = http.ProxyURL(upstreamURL)
+	if upstreamProxyURL != nil {
+		transport.Proxy = http.ProxyURL(upstreamProxyURL)
 	} else {
 		// 显式禁用系统代理，确保上游连接为直接连接
 		transport.Proxy = nil
 	}
 
     // 实例化拦截器
-	demo := NewDemoInterceptor(*upstreamHost, *pathReplace)
+	demo := NewDemoInterceptor(*upstreamHostUrlStr)
 
 	proxy := &ProxyServer{
 		CertManager:         cm,
-		UpstreamProxy:       upstreamURL,
+		UpstreamProxy:       upstreamProxyURL,
 		RequestInterceptor:  demo,
 		ResponseInterceptor: demo,
 		Client: &http.Client{

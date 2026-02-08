@@ -8,14 +8,12 @@ import (
 // DemoInterceptor 演示了如何同时实现请求和响应拦截器。
 // 它展示了修改路径、添加/删除 Header 的功能。
 type DemoInterceptor struct{
-	UpstreamHost string // 上游代理主机名/IP
-	PathReplace  string // 替换路径的字符串
+	UpstreamUrl string
 }
 
-func NewDemoInterceptor(upstreamHost, pathReplace string) *DemoInterceptor {
+func NewDemoInterceptor(UpstreamUrl string) *DemoInterceptor {
 	return &DemoInterceptor{
-		UpstreamHost: upstreamHost,
-		PathReplace:  pathReplace,
+		UpstreamUrl: UpstreamUrl,
 	}
 }
 
@@ -32,21 +30,18 @@ func (d *DemoInterceptor) OnRequest(req *http.Request) error {
 	//log.Printf("[DemoInterceptor] Request URL: %s", url)
 
 	// 1. 修改路径
-	newURL, err := url.Parse("https://" + d.UpstreamHost + d.PathReplace)
+	newURL, err := url.Parse(d.UpstreamUrl)
 	if err != nil {
 		logDebug("[DemoInterceptor] Error parsing URL: %v", err)
 		return err
 	}
 	req.URL = newURL
 	// 2. 修改 Host 头 (必须直接修改 req.Host 字段)
-	req.Host = d.UpstreamHost
+	req.Host = newURL.Hostname()
 	
 	// 3. 删除 Header 中的 Host 字段
 	req.Header.Del("Host")
-	req.Header.Del("host")
-
-	req.Header.Set("Host", d.UpstreamHost)
-
+	
 	// 4. 添加/设置 Header
 	logDebug("head url: %s", urlValue)
 	req.Header.Set("X-Upstream-Url", urlValue)
