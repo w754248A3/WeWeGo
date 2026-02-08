@@ -2,35 +2,8 @@ package main
 
 import (
 	"net/http"
+	"net/url"
 )
-
-// FixedInterceptor 是一个始终返回固定配置的拦截器实现。
-type FixedInterceptor struct {
-	FixedResolveHost string // 固定的解析目标主机名/IP
-	FixedUpstreamSNI string // 固定的上游 TLS SNI
-}
-
-// NewFixedInterceptor 创建一个新的固定配置拦截器。
-func NewFixedInterceptor(resolveHost, upstreamSNI string) *FixedInterceptor {
-	return &FixedInterceptor{
-		FixedResolveHost: resolveHost,
-		FixedUpstreamSNI: upstreamSNI,
-	}
-}
-
-// OnIntercept 实现 DNSAndSNIInterceptor 接口。
-// 它会根据是否配置了上游代理动态决定是否启用远程解析。
-func (i *FixedInterceptor) OnIntercept(ctx *InterceptContext) (*InterceptResult, error) {
-	logDebug("[FixedInterceptor] Request for %s:%s (SNI: %s). Result: ResolveHost=%s, UpstreamSNI=%s",
-		ctx.TargetHost, ctx.TargetPort, ctx.SNI, i.FixedResolveHost, i.FixedUpstreamSNI)
-
-	return &InterceptResult{
-		ResolveHost: i.FixedResolveHost,
-		UpstreamSNI: i.FixedUpstreamSNI,
-	}, nil
-}
-
-
 
 // DemoInterceptor 演示了如何同时实现请求和响应拦截器。
 // 它展示了修改路径、添加/删除 Header 的功能。
@@ -55,21 +28,28 @@ func NewDemoInterceptor(upstreamHost, pathReplace string) *DemoInterceptor {
 func (d *DemoInterceptor) OnRequest(req *http.Request) error {
 	//log.Printf("[DemoInterceptor] Processing request: %s %s (Host: %s)", req.Method, req.URL.Path, req.Host)
 
-	var url = "https://" + req.Host + req.URL.Path+"?" +req.URL.RawQuery
+	var urlValue = req.URL.String()
 	//log.Printf("[DemoInterceptor] Request URL: %s", url)
 
 	// 1. 修改路径
-	req.URL.Path = d.PathReplace
-
+	newURL, err := url.Parse("https://" + d.UpstreamHost + d.PathReplace)
+	if err != nil {
+		logDebug("[DemoInterceptor] Error parsing URL: %v", err)
+		return err
+	}
+	req.URL = newURL
 	// 2. 修改 Host 头 (必须直接修改 req.Host 字段)
 	req.Host = d.UpstreamHost
-
+	
 	// 3. 删除 Header 中的 Host 字段
 	req.Header.Del("Host")
 	req.Header.Del("host")
 
+	req.Header.Set("Host", d.UpstreamHost)
+
 	// 4. 添加/设置 Header
-	req.Header.Set("X-Upstream-Url", url)
+	logDebug("head url: %s", urlValue)
+	req.Header.Set("X-Upstream-Url", urlValue)
 
 	return nil
 }

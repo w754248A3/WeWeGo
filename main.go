@@ -1,24 +1,3 @@
-/*
-Package main 提供了 WeWeGo 高性能 HTTPS 代理工具的实现。
-
-WeWeGo 是一个基于 中间人攻击 (MITM) 技术的代理服务器，主要用于 HTTPS 流量的透明拦截、检查与过滤。
-其核心功能包括：
-1. 动态签发受信任的根证书 (CA)。
-2. 针对目标域名实时生成并缓存中间人证书。
-3. 支持 HTTP CONNECT 隧道的劫持与解密。
-4. 提供可扩展的请求/响应过滤接口。
-
-设计模式：
-- 采用单例/配置模式管理代理服务器。
-- 使用 LRU 缓存算法优化证书生成性能。
-- 插件化过滤器设计，支持自定义流量处理逻辑。
-
-并发安全性：
-- 证书管理器 (CertManager) 采用互斥锁 (sync.Mutex) 保证并发环境下证书签发与缓存的一致性。
-- 代理服务器为每个连接启动独立的 Goroutine 处理，具备高并发处理能力。
-
-版本：v1.0.0
-*/
 package main
 
 import (
@@ -282,7 +261,9 @@ func handleProxy() {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
+			NextProtos: []string{"h2", "http/1.1"},
 		},
+		ForceAttemptHTTP2: true,
 	}
 
 	// 如果指定了上游代理，则配置 Transport 使用该代理
@@ -293,7 +274,6 @@ func handleProxy() {
 		transport.Proxy = nil
 	}
 
-	interceptor := NewFixedInterceptor(*upstreamHost, *upstreamHost)
     // 实例化拦截器
 	demo := NewDemoInterceptor(*upstreamHost, *pathReplace)
 
@@ -302,7 +282,6 @@ func handleProxy() {
 		UpstreamProxy:       upstreamURL,
 		RequestInterceptor:  demo,
 		ResponseInterceptor: demo,
-		Interceptor:         interceptor,
 		Client: &http.Client{
 			Transport: transport,
 			// 默认不跟随重定向，将重定向响应透传给客户端
@@ -554,7 +533,6 @@ type ProxyServer struct {
 	CertManager         *CertManager         // 证书管理器，用于 MITM
 	Client              *http.Client         // 用于向上游服务器发起请求的客户端
 	UpstreamProxy       *url.URL             // 可选的上游代理服务器
-	Interceptor         DNSAndSNIInterceptor // 可插拔的拦截器
 	RequestInterceptor  RequestInterceptor   // 请求拦截器
 	ResponseInterceptor ResponseInterceptor  // 响应拦截器
 }
@@ -695,8 +673,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // 1. 劫持 (Hijack) 客户端连接，脱离标准 HTTP Server 逻辑。
 // 2. 返回 200 Connection Established 告知客户端隧道已就绪。
 // 3. 动态获取目标域名的证书，与客户端进行 MITM TLS 握手。
-// 4. 同时与真实上游服务器建立 TLS 连接。
-// 5. 调用 transferWithLogging 开始解密并转发流量。
+// 4. 使用 http.Server 处理握手后的连接，支持 HTTP/1.1 和 HTTP/2。
 func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	destHost := r.URL.Host
 	targetHost, targetPort, _ := net.SplitHostPort(destHost)
@@ -732,38 +709,6 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("Failed to peek SNI for %s: %v", targetHost, err)
 		// 即使失败也继续，不中断连接。
-		// 原因：SNI 并非必须（例如客户端不支持 SNI 或非 TLS 流量），
-		// 此时我们将依赖 CONNECT 请求中的 Host 进行后续处理。
-	}
-
-	// 准备拦截器上下文
-	interceptCtx := &InterceptContext{
-		TargetHost:  targetHost,
-		TargetPort:  targetPort,
-		SNI:         sni,
-		HasUpstream: p.UpstreamProxy != nil,
-	}
-
-	// 默认结果（向后兼容）
-	interceptRes := &InterceptResult{
-		ResolveHost: targetHost,
-		UpstreamSNI: sni,
-	}
-	if interceptRes.UpstreamSNI == "" {
-		interceptRes.UpstreamSNI = targetHost
-	}
-
-	// 调用拦截器
-	if p.Interceptor != nil {
-		res, err := p.Interceptor.OnIntercept(interceptCtx)
-		if err != nil {
-			log.Printf("Interceptor error for %s: %v, falling back to 502", targetHost, err)
-			clientConn.Close()
-			return
-		}
-		if res != nil {
-			interceptRes = res
-		}
 	}
 
 	// 4. 执行中间人 (MitM) TLS 握手
@@ -782,6 +727,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{*cert},
 		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"h2", "http/1.1"}, // 启用 HTTP/2 支持
 	}
 
 	// 作为服务器与客户端握手
@@ -791,189 +737,162 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		tlsClientConn.Close()
 		return
 	}
-	// 确保连接在函数退出时关闭，防止资源泄漏
-	defer tlsClientConn.Close()
+	// 注意：连接关闭由 http.Server 管理，此处不需要 defer Close，
+	// 除非 Serve 返回错误且未关闭连接。但在 SingleConnListener 中，
+	// 我们将连接传递给 Server，Server 负责关闭它。
 
-	// 5. 与真实上游服务器建立 TLS 连接
-	var upstreamConn net.Conn
-	upstreamTarget := net.JoinHostPort(interceptRes.ResolveHost, targetPort)
-	if interceptRes.ResolveHost == "" {
-		upstreamTarget = destHost // 如果没有指定解析域名，回退到原始目标
+	// 5. 使用 http.Server 处理 HTTP/1.1 和 HTTP/2 请求
+	// 创建一个 TunnelHandler，它将请求转发到上游
+	tunnelHandler := &TunnelHandler{
+		proxy:       p,
+		targetHost:  targetHost, // 原始目标主机
+		targetPort:  targetPort,
 	}
 
-	if p.UpstreamProxy != nil {
-		// 5.1 通过上游代理建立连接
-		proxyConn, err := net.DialTimeout("tcp", p.UpstreamProxy.Host, 10*time.Second)
-		if err != nil {
-			log.Printf("Failed to connect to upstream proxy %s: %v", p.UpstreamProxy.Host, err)
-			return
-		}
+	// 创建一个单连接 Listener
+	listener := &SingleConnListener{
+		conn: tlsClientConn,
+	}
 
-		// 5.2 发送 CONNECT 请求建立隧道
-		// 优先使用拦截器指定的 ResolveHost，如果未指定（为空或等于原始目标），则回退到原始 destHost
-		proxyDest := interceptRes.ResolveHost
-		if proxyDest == "" || proxyDest == targetHost {
-			proxyDest = destHost
-		} else {
-			// 如果指定了 ResolveHost，需要补上端口
-			proxyDest = net.JoinHostPort(proxyDest, targetPort)
-		}
+	// 启动内部 Server
+	// Server 会自动协商 H1/H2
+	innerServer := &http.Server{
+		Handler: tunnelHandler,
+	}
 
-		connectReq := &http.Request{
-			Method: http.MethodConnect,
-			URL:    &url.URL{Opaque: proxyDest},
-			Host:   proxyDest,
-			Header: make(http.Header),
-		}
-		if err := connectReq.Write(proxyConn); err != nil {
-			proxyConn.Close()
-			log.Printf("Failed to write CONNECT request to proxy: %v", err)
-			return
-		}
-
-		// 5.3 读取代理响应
-		br := bufio.NewReader(proxyConn)
-		resp, err := http.ReadResponse(br, connectReq)
-		if err != nil {
-			proxyConn.Close()
-			log.Printf("Failed to read CONNECT response from proxy: %v", err)
-			return
-		}
-		if resp.StatusCode != http.StatusOK {
-			proxyConn.Close()
-			log.Printf("Proxy returned non-200 status: %s", resp.Status)
-			return
-		}
-
-		// 5.4 在建立的隧道上进行 TLS 客户端握手
-		var combinedConn net.Conn = &bufferedConn{Conn: proxyConn, r: io.MultiReader(br, proxyConn)}
-		tlsUpstreamConn := tls.Client(combinedConn, &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			ServerName: interceptRes.UpstreamSNI,
-		})
-		if err := tlsUpstreamConn.Handshake(); err != nil {
-			tlsUpstreamConn.Close()
-			log.Printf("TLS handshake with upstream %s via proxy failed: %v", proxyDest, err)
-			return
-		}
-		upstreamConn = tlsUpstreamConn
-	} else {
-		// 5.1 直接与真实上游建立 TLS 连接
-		var err error
-		upstreamConn, err = tls.Dial("tcp", upstreamTarget, &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			ServerName: interceptRes.UpstreamSNI,
-		})
-		if err != nil {
-			log.Printf("Failed to connect to upstream %s: %v", upstreamTarget, err)
-			return
+	logDebug("MitM Session started for %s (SNI: %s, Proto: %s)", targetHost, sni, tlsClientConn.ConnectionState().NegotiatedProtocol)
+	
+	if err := innerServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+		// ErrServerClosed 是正常退出（如果调用了 Shutdown，但这里通常是连接关闭）
+		// 如果是 listener 关闭导致的错误，通常可以忽略
+		if !strings.Contains(err.Error(), "use of closed network connection") {
+			logDebug("Inner server error for %s: %v", targetHost, err)
 		}
 	}
-	defer upstreamConn.Close()
-
-	logDebug("MitM Session started for %s (SNI: %s, UpstreamSNI: %s)", targetHost, sni, interceptRes.UpstreamSNI)
-
-	// 6. 开始双向解密转发
-	p.transferWithLogging(tlsClientConn, upstreamConn, targetHost)
 
 	logDebug("MitM Session closed for %s", targetHost)
 }
 
-// transferWithLogging 管理客户端与服务器之间的解密流量转发。
-//
-// 核心逻辑：
-// 采用双向循环，从客户端读取请求并应用 RequestFilter，然后转发给服务器；
-// 从服务器读取响应并应用 ResponseFilter，然后转发给客户端。
-//
-// 约束：
-// 该方法会一直阻塞直到连接断开。
-func (p *ProxyServer) transferWithLogging(client net.Conn, server net.Conn, host string) {
-	clientReader := bufio.NewReader(client)
-	serverReader := bufio.NewReader(server)
-
-	for {
-		// 1. 读取并解析客户端解密后的 HTTP 请求
-		req, err := http.ReadRequest(clientReader)
-		if err != nil {
-			if err != io.EOF && !strings.Contains(err.Error(), "closed") {
-				logDebug("Error reading request from %s: %v", host, err)
-			}
-			return
-		}
-
-		// 必须清除 RequestURI，否则后续 req.Write 会报错
-		req.RequestURI = ""
-
-		logDebug("[%s] Request received", host)
-
-		// 2. 应用请求拦截器 (可在此时修改 Header、Path 或拦截请求)
-		if p.RequestInterceptor != nil {
-			if err := p.RequestInterceptor.OnRequest(req); err != nil {
-				logDebug("[%s] Request intercepted: %v", host, err)
-				return
-			}
-		}
-
-		// 3. 将请求转发给真实上游服务器
-		if err := req.Write(server); err != nil {
-			logDebug("[%s] Error writing to server: %v", host, err)
-			return
-		}
-
-		// 4. 读取真实上游服务器的响应
-		resp, err := http.ReadResponse(serverReader, req)
-		if err != nil {
-			if err != io.EOF && !strings.Contains(err.Error(), "closed") {
-				logDebug("[%s] Error reading response: %v", host, err)
-			}
-			return
-		}
-
-		logDebug("[%s] Response received: %s", host, resp.Status)
-
-		// 5. 应用响应拦截器 (可在此时注入脚本、修改 Header 或记录数据)
-		if p.ResponseInterceptor != nil {
-			if err := p.ResponseInterceptor.OnResponse(resp); err != nil {
-				logDebug("[%s] Response intercepted: %v", host, err)
-				return
-			}
-		}
-
-		// 6. 将响应写回客户端
-		if err := resp.Write(client); err != nil {
-			logDebug("[%s] Error writing to client: %v", host, err)
-			return
-		}
-		resp.Body.Close()
-	}
-}
-
 // handleHTTP 处理普通的 HTTP 请求。
-// 当前策略：仅作为占位符，因为绝大多数流量已在 ServeHTTP 中重定向至 HTTPS。
 func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Plain HTTP not supported, use HTTPS", http.StatusForbidden)
 }
 
+// --- New Types for HTTP/2 Support ---
+
+// TunnelHandler 处理隧道内的 HTTP 请求，将其转发到上游。
+type TunnelHandler struct {
+	proxy       *ProxyServer
+	targetHost  string
+	targetPort  string
+}
+
+func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 1. 重建请求 URL
+	// r.URL 在 Server 接收时通常是相对路径 (H1) 或绝对路径 (H2)
+	// 我们需要确保它是绝对路径以便 Client.Do 使用
+	if r.URL.Scheme == "" {
+		r.URL.Scheme = "https"
+	}
+	if r.URL.Host == "" {
+		r.URL.Host = r.Host
+		if r.URL.Host == "" {
+			// 如果 Header 中也没有 Host，回退到 targetHost
+			r.URL.Host = net.JoinHostPort(h.targetHost, h.targetPort)
+		}
+	}
+	
+	// 清理 RequestURI (Client.Do 不允许设置)
+	r.RequestURI = ""
+	
+	logDebug("[%s] Request received: %s %s", h.targetHost, r.Method, r.URL.String())
+
+	// 2. 应用请求拦截器
+	if h.proxy.RequestInterceptor != nil {
+		if err := h.proxy.RequestInterceptor.OnRequest(r); err != nil {
+			logDebug("[%s] Request intercepted error: %v", h.targetHost, err)
+			http.Error(w, "Request Intercepted", http.StatusBadGateway)
+			return
+		}
+	}
+	logDebug("[%s] Request received: %s %s", h.targetHost, r.Method, r.URL.String())
+	// 3. 转发请求
+	// 注意：p.Client 已配置 Transport (含 H2 支持)
+	// 我们可能需要调整 SNI。http.Transport 默认使用 URL.Host 作为 SNI。
+	// 如果需要强制使用 UpstreamSNI，可能需要自定义 Transport 或 Context。
+	// 但通常 URL.Host 就是正确的 SNI。
+
+	// Fix: 对于 GET 和 HEAD 请求，必须显式清空 Body，否则 http.Transport 会认为有 Body 并尝试发送，
+	// 导致上游服务器报错 "Request with a GET or HEAD method cannot have a body"。
+	// http.Server 传入的 Request.Body 即使为空也是一个非 nil 的 Reader。
+	if r.Method == "GET" || r.Method == "HEAD" {
+		r.Body = nil
+		r.ContentLength = 0
+	}
+
+	resp, err := h.proxy.Client.Do(r)
+	if err != nil {
+		logDebug("[%s] Forward error: %v", h.targetHost, err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	logDebug("[%s] Response received: %s", h.targetHost, resp.Status)
+
+	// 4. 应用响应拦截器
+	if h.proxy.ResponseInterceptor != nil {
+		if err := h.proxy.ResponseInterceptor.OnResponse(resp); err != nil {
+			logDebug("[%s] Response intercepted error: %v", h.targetHost, err)
+			http.Error(w, "Response Intercepted", http.StatusBadGateway)
+			return
+		}
+	}
+
+	// 5. 写回响应
+	copyHeader(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
+}
+
+// SingleConnListener 将单个 net.Conn 适配为 net.Listener。
+// 用于让 http.Server 服务于一个已经建立的连接。
+type SingleConnListener struct {
+	conn net.Conn
+	mu   sync.Mutex
+	done bool
+}
+
+func (l *SingleConnListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done {
+		// 阻塞直到 Close 被调用，或者直接返回 Closed。
+		// http.Server 在 Accept 返回错误时会停止。
+		// 为了防止 Server 自旋，这里应该只返回一次 Conn，第二次返回 Error。
+		return nil, net.ErrClosed
+	}
+	l.done = true
+	return l.conn, nil
+}
+
+func (l *SingleConnListener) Close() error {
+	return nil
+}
+
+func (l *SingleConnListener) Addr() net.Addr {
+	return l.conn.LocalAddr()
+}
+
 // --- Filters & Interceptors ---
-
-// InterceptContext 包含拦截器所需的上下文信息。
-type InterceptContext struct {
-	TargetHost  string // CONNECT 请求中的主机名
-	TargetPort  string // CONNECT 请求中的端口
-	SNI         string // 从下游 TLS ClientHello 提取的 SNI
-	HasUpstream bool   // 是否配置了上游代理
-}
-
-// InterceptResult 包含拦截器的处理结果。
-type InterceptResult struct {
-	ResolveHost string // 用于本地解析的域名/IP（为空表示跳过解析）
-	UpstreamSNI string // 用于上游 TLS 握手的 SNI
-}
-
-// DNSAndSNIInterceptor 定义了可插拔的 DNS 与 SNI 拦截接口。
-type DNSAndSNIInterceptor interface {
-	OnIntercept(ctx *InterceptContext) (*InterceptResult, error)
-}
 
 // RequestInterceptor 定义了请求拦截器接口。
 type RequestInterceptor interface {

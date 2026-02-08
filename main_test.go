@@ -11,7 +11,6 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -159,106 +158,6 @@ func TestProxyConfig(t *testing.T) {
 	if transport.Proxy != nil {
 		t.Error("Upstream proxy should be disabled (nil)")
 	}
-}
-
-// mockInterceptor 用于测试
-type mockInterceptor struct {
-	onInterceptFunc func(ctx *InterceptContext) (*InterceptResult, error)
-}
-
-func (m *mockInterceptor) OnIntercept(ctx *InterceptContext) (*InterceptResult, error) {
-	return m.onInterceptFunc(ctx)
-}
-
-// TestInterceptorScenarios 验证拦截器在各种场景下的表现。
-func TestInterceptorScenarios(t *testing.T) {
-	// 场景 1: 强制指定 SNI
-	t.Run("ForceSNI", func(t *testing.T) {
-		interceptor := &mockInterceptor{
-			onInterceptFunc: func(ctx *InterceptContext) (*InterceptResult, error) {
-				return &InterceptResult{
-					ResolveHost: ctx.TargetHost,
-					UpstreamSNI: "forced.example.com",
-				}, nil
-			},
-		}
-
-		ctx := &InterceptContext{TargetHost: "example.com", TargetPort: "443", SNI: "client.example.com"}
-		res, err := interceptor.OnIntercept(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.UpstreamSNI != "forced.example.com" {
-			t.Errorf("Expected forced.example.com, got %s", res.UpstreamSNI)
-		}
-	})
-
-	// 场景 2: 默认远程解析 (移除 RemoteResolve 字段测试)
-	t.Run("DefaultRemoteResolve", func(t *testing.T) {
-		interceptor := &mockInterceptor{
-			onInterceptFunc: func(ctx *InterceptContext) (*InterceptResult, error) {
-				return &InterceptResult{}, nil // 返回空结果，默认行为
-			},
-		}
-
-		ctx := &InterceptContext{TargetHost: "blocked.com", TargetPort: "443", HasUpstream: true}
-		res, err := interceptor.OnIntercept(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		// 验证逻辑已变更，无需检查 RemoteResolve 字段
-		if res.ResolveHost != "" {
-			t.Error("Expected empty ResolveHost")
-		}
-	})
-
-	// 场景 4: 自定义 ResolveHost 且有上游代理时，验证 ResolveHost 优先级
-	t.Run("ResolveHostWithProxy", func(t *testing.T) {
-		interceptor := &mockInterceptor{
-			onInterceptFunc: func(ctx *InterceptContext) (*InterceptResult, error) {
-				return &InterceptResult{
-					ResolveHost: "B.com",
-					UpstreamSNI: "B.com",
-				}, nil
-			},
-		}
-
-		ctx := &InterceptContext{TargetHost: "A.com", TargetPort: "443", HasUpstream: true}
-		res, err := interceptor.OnIntercept(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// 模拟 handleConnect 中的判定逻辑
-		proxyDest := net.JoinHostPort(res.ResolveHost, ctx.TargetPort)
-		destHost := net.JoinHostPort(ctx.TargetHost, ctx.TargetPort)
-
-		// 新逻辑：只要指定了 ResolveHost 且不等于 targetHost，就使用它；否则回退到 destHost
-		if res.ResolveHost == "" || res.ResolveHost == ctx.TargetHost {
-			proxyDest = destHost
-		}
-
-		if proxyDest != "B.com:443" {
-			t.Errorf("Expected proxyDest to be B.com:443, got %s. ResolveHost should take precedence!", proxyDest)
-		}
-	})
-
-	// 场景 5: 拦截器异常处理
-	t.Run("InterceptorError", func(t *testing.T) {
-		// 此处主要验证逻辑流程，实际 handleConnect 中的处理在集成测试中体现更佳
-		// 这里仅验证接口调用符合预期
-		expectedErr := "interceptor failed"
-		interceptor := &mockInterceptor{
-			onInterceptFunc: func(ctx *InterceptContext) (*InterceptResult, error) {
-				return nil, http.ErrAbortHandler
-			},
-		}
-
-		_, err := interceptor.OnIntercept(&InterceptContext{})
-		if err != http.ErrAbortHandler {
-			t.Errorf("Expected %v, got %v", expectedErr, err)
-		}
-	})
 }
 
 // TestParseSNI 验证 SNI 解析逻辑的正确性。

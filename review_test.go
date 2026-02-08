@@ -133,42 +133,4 @@ func (m *MockConn) SetDeadline(t time.Time) error { return nil }
 func (m *MockConn) SetReadDeadline(t time.Time) error { return nil }
 func (m *MockConn) SetWriteDeadline(t time.Time) error { return nil }
 
-// TestTransferCleanup 验证 transferWithLogging 在连接断开时是否正确关闭资源
-func TestTransferCleanup(t *testing.T) {
-	proxy := &ProxyServer{}
-	
-	// 模拟客户端发送一个简单的 HTTP 请求
-	clientData := "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
-	clientConn := NewMockConn(clientData)
-	
-	// 模拟服务端响应
-	serverData := "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello"
-	serverConn := NewMockConn(serverData)
 
-	// 运行 transferWithLogging
-	// 注意：这是一个死循环函数，我们需要它在处理完一次交互后退出，
-	// 或者通过关闭连接来触发退出。
-	// transferWithLogging 会循环读取。当 ReadRequest 返回 EOF 时退出。
-	// 我们的 MockConn 在读完 buffer 后会返回 EOF。
-	
-	proxy.transferWithLogging(clientConn, serverConn, "example.com")
-
-	// 验证：
-	// transferWithLogging 本身不负责关闭传入的 client/server conn (由调用者 handleConnect 负责 defer Close)
-	// 但它负责关闭 resp.Body。
-	// 由于我们无法直接检测 resp.Body.Close() (它是内部创建的)，
-	// 我们可以通过检测 serverConn 的读取状态来间接推断？不行。
-	
-	// 修正：我们要测试的是内存泄漏检测中提到的 "未关闭的文件句柄"。
-	// 实际上，transferWithLogging 内部 resp.Body.Close() 是关键。
-	// 如果 http.ReadResponse 返回的 Body 是基于 serverConn 的，
-	// 关闭 Body 通常不会关闭底层连接（除非是 CloseNotify），但会释放 buffer。
-	
-	// 这个测试主要验证函数能正常退出，不会死锁。
-	if clientConn.WriteBuffer.Len() == 0 {
-		t.Error("Client should have received data")
-	}
-	if serverConn.WriteBuffer.Len() == 0 {
-		t.Error("Server should have received data")
-	}
-}
