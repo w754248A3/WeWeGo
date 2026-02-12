@@ -41,19 +41,22 @@ func logDebug(format string, v ...interface{}) {
 // main acts as the entry point of the application.
 //
 // Description:
-//   It parses the command-line arguments to determine which subcommand ('genca' or 'proxy') to execute.
-//   It serves as the dispatcher for the CLI tool.
+//
+//	It parses the command-line arguments to determine which subcommand ('genca' or 'proxy') to execute.
+//	It serves as the dispatcher for the CLI tool.
 //
 // Parameters:
-//   None (uses os.Args directly).
+//
+//	None (uses os.Args directly).
 //
 // Return Value:
-//   None.
+//
+//	None.
 //
 // Implementation Logic:
-//   1. Validates the number of command-line arguments.
-//   2. Switches on the first argument (subcommand) to invoke the corresponding handler function.
-//   3. Exits with status code 1 if the command is unknown or arguments are missing.
+//  1. Validates the number of command-line arguments.
+//  2. Switches on the first argument (subcommand) to invoke the corresponding handler function.
+//  3. Exits with status code 1 if the command is unknown or arguments are missing.
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: wewego <command> [arguments]")
@@ -75,25 +78,28 @@ func main() {
 // handleGenCA handles the generation of the Root Certificate Authority (CA).
 //
 // Description:
-//   This function generates a 4096-bit RSA private key and a self-signed CA certificate.
-//   It exports the generated key and certificate in multiple formats (PEM, DER, PKCS#12)
-//   to facilitate import into different operating systems and browsers.
+//
+//	This function generates a 4096-bit RSA private key and a self-signed CA certificate.
+//	It exports the generated key and certificate in multiple formats (PEM, DER, PKCS#12)
+//	to facilitate import into different operating systems and browsers.
 //
 // Parameters:
-//   None (uses os.Args for flag parsing).
+//
+//	None (uses os.Args for flag parsing).
 //
 // Return Value:
-//   None.
+//
+//	None.
 //
 // Implementation Logic:
-//   1. Parses command-line flags for the 'genca' subcommand.
-//   2. Generates a secure RSA private key (4096 bits).
-//   3. Creates a self-signed X.509 certificate template with CA properties (IsCA=true, KeyUsage).
-//   4. Exports the certificate and key to files:
-//      - ca-cert.pem: PEM encoded certificate.
-//      - ca-key.pem: PEM encoded private key.
-//      - ca.cer: DER encoded certificate (for Windows).
-//      - ca.p12: PKCS#12 archive (for browsers).
+//  1. Parses command-line flags for the 'genca' subcommand.
+//  2. Generates a secure RSA private key (4096 bits).
+//  3. Creates a self-signed X.509 certificate template with CA properties (IsCA=true, KeyUsage).
+//  4. Exports the certificate and key to files:
+//     - ca-cert.pem: PEM encoded certificate.
+//     - ca-key.pem: PEM encoded private key.
+//     - ca.cer: DER encoded certificate (for Windows).
+//     - ca.p12: PKCS#12 archive (for browsers).
 func handleGenCA() {
 	// --- Step 1: Parse Flags ---
 	fs := flag.NewFlagSet("genca", flag.ExitOnError)
@@ -151,7 +157,7 @@ func handleGenCA() {
 	}
 
 	// --- Step 5: Export Files ---
-	
+
 	// Export PEM Certificate
 	certPemFile, err := os.Create("ca-cert.pem")
 	if err != nil {
@@ -210,19 +216,22 @@ func handleGenCA() {
 // computeSKI calculates the Subject Key Identifier (SKI) for an RSA private key.
 //
 // Description:
-//   The SKI is used to identify the public key corresponding to a private key.
-//   It is essential for building certificate chains.
+//
+//	The SKI is used to identify the public key corresponding to a private key.
+//	It is essential for building certificate chains.
 //
 // Parameters:
-//   priv (*rsa.PrivateKey): The private key to compute the SKI for.
+//
+//	priv (*rsa.PrivateKey): The private key to compute the SKI for.
 //
 // Return Value:
-//   ([]byte): The SHA-256 hash of the marshaled public key.
+//
+//	([]byte): The SHA-256 hash of the marshaled public key.
 //
 // Implementation Logic:
-//   1. Marshal the public key part of the private key to PKCS#1 format.
-//   2. Compute the SHA-256 hash of the marshaled bytes.
-//   3. Return the hash slice.
+//  1. Marshal the public key part of the private key to PKCS#1 format.
+//  2. Compute the SHA-256 hash of the marshaled bytes.
+//  3. Return the hash slice.
 func computeSKI(priv *rsa.PrivateKey) []byte {
 	pubBytes := x509.MarshalPKCS1PublicKey(&priv.PublicKey)
 	hash := sha256.Sum256(pubBytes)
@@ -232,27 +241,30 @@ func computeSKI(priv *rsa.PrivateKey) []byte {
 // handleProxy starts and manages the HTTPS proxy server.
 //
 // Description:
-//   This is the main entry point for the 'proxy' subcommand. It initializes the
-//   proxy server components, including the Certificate Authority, Certificate Manager,
-//   Request/Response Interceptors, and the HTTP/TCP listeners. It also handles
-//   graceful shutdown on system signals.
+//
+//	This is the main entry point for the 'proxy' subcommand. It initializes the
+//	proxy server components, including the Certificate Authority, Certificate Manager,
+//	Request/Response Interceptors, and the HTTP/TCP listeners. It also handles
+//	graceful shutdown on system signals.
 //
 // Parameters:
-//   None (uses os.Args for flag parsing).
+//
+//	None (uses os.Args for flag parsing).
 //
 // Return Value:
-//   None.
+//
+//	None.
 //
 // Implementation Logic:
-//   1. Parse command-line arguments (listen address, CA paths, upstream proxy/host).
-//   2. Validate upstream host configuration.
-//   3. Load the CA certificate and key for MITM operations.
-//   4. Initialize the CertManager with an LRU cache.
-//   5. Configure the HTTP Transport with HTTP/2 support and upstream proxy settings.
-//   6. Initialize the DemoInterceptor for request/response modification.
-//   7. Set up the ProxyServer handler and the http.Server.
-//   8. Start a goroutine for signal handling to support graceful shutdown.
-//   9. Start the server and listen for incoming connections.
+//  1. Parse command-line arguments (listen address, CA paths, upstream proxy/host).
+//  2. Validate upstream host configuration.
+//  3. Load the CA certificate and key for MITM operations.
+//  4. Initialize the CertManager with an LRU cache.
+//  5. Configure the HTTP Transport with HTTP/2 support and upstream proxy settings.
+//  6. Initialize the DemoInterceptor for request/response modification.
+//  7. Set up the ProxyServer handler and the http.Server.
+//  8. Start a goroutine for signal handling to support graceful shutdown.
+//  9. Start the server and listen for incoming connections.
 func handleProxy() {
 	// --- Step 1: Parse and Validate Flags ---
 	caCertPath := flag.String("cacert", "ca-cert.pem", "Path to CA certificate")
@@ -318,7 +330,6 @@ func handleProxy() {
 	// --- Step 4: Initialize ProxyServer ---
 	proxy := &ProxyServer{
 		CertManager:         cm,
-		UpstreamProxy:       upstreamProxyURL,
 		RequestInterceptor:  demo,
 		ResponseInterceptor: demo,
 		Client: &http.Client{
@@ -361,15 +372,17 @@ func handleProxy() {
 // CertManager manages the dynamic generation and caching of TLS certificates.
 //
 // Description:
-//   It acts as an intermediate Certificate Authority (MITM CA), generating
-//   certificates on-the-fly for intercepted domains. It employs an LRU cache
-//   to minimize the overhead of key generation and signing.
+//
+//	It acts as an intermediate Certificate Authority (MITM CA), generating
+//	certificates on-the-fly for intercepted domains. It employs an LRU cache
+//	to minimize the overhead of key generation and signing.
 //
 // Fields:
-//   caCert: The root CA certificate used for signing.
-//   caPrivKey: The private key of the root CA.
-//   cache: An LRU cache storing generated certificates.
-//   mu: Mutex for thread-safe access to the cache.
+//
+//	caCert: The root CA certificate used for signing.
+//	caPrivKey: The private key of the root CA.
+//	cache: An LRU cache storing generated certificates.
+//	mu: Mutex for thread-safe access to the cache.
 type CertManager struct {
 	caCert    *x509.Certificate
 	caPrivKey interface{}
@@ -380,20 +393,23 @@ type CertManager struct {
 // NewCertManager creates and initializes a new CertManager instance.
 //
 // Description:
-//   Initializes the CertManager with the provided CA certificate and a configured
-//   LRU cache size.
+//
+//	Initializes the CertManager with the provided CA certificate and a configured
+//	LRU cache size.
 //
 // Parameters:
-//   ca (tls.Certificate): The loaded CA certificate pair.
-//   cacheSize (int): The maximum number of certificates to hold in memory.
+//
+//	ca (tls.Certificate): The loaded CA certificate pair.
+//	cacheSize (int): The maximum number of certificates to hold in memory.
 //
 // Return Value:
-//   (*CertManager): A pointer to the initialized CertManager.
+//
+//	(*CertManager): A pointer to the initialized CertManager.
 //
 // Implementation Logic:
-//   1. Parse the x509 leaf certificate from the tls.Certificate.
-//   2. Initialize the LRUCache.
-//   3. Return the struct.
+//  1. Parse the x509 leaf certificate from the tls.Certificate.
+//  2. Initialize the LRUCache.
+//  3. Return the struct.
 func NewCertManager(ca tls.Certificate, cacheSize int) *CertManager {
 	cert, _ := x509.ParseCertificate(ca.Certificate[0])
 	return &CertManager{
@@ -406,16 +422,19 @@ func NewCertManager(ca tls.Certificate, cacheSize int) *CertManager {
 // loadCA loads the CA certificate and private key from the filesystem.
 //
 // Description:
-//   Reads the PEM encoded certificate and key files and parses them into a
-//   tls.Certificate object.
+//
+//	Reads the PEM encoded certificate and key files and parses them into a
+//	tls.Certificate object.
 //
 // Parameters:
-//   certPath (string): Path to the CA certificate file.
-//   keyPath (string): Path to the CA private key file.
+//
+//	certPath (string): Path to the CA certificate file.
+//	keyPath (string): Path to the CA private key file.
 //
 // Return Value:
-//   (tls.Certificate): The parsed certificate pair.
-//   (error): Error object if loading fails.
+//
+//	(tls.Certificate): The parsed certificate pair.
+//	(error): Error object if loading fails.
 func loadCA(certPath, keyPath string) (tls.Certificate, error) {
 	return tls.LoadX509KeyPair(certPath, keyPath)
 }
@@ -423,23 +442,26 @@ func loadCA(certPath, keyPath string) (tls.Certificate, error) {
 // GetCertificate retrieves or generates a certificate for the given domain.
 //
 // Description:
-//   This is the core method for obtaining a server certificate during the TLS handshake.
-//   It first checks the in-memory cache. If missing, it generates a new one.
+//
+//	This is the core method for obtaining a server certificate during the TLS handshake.
+//	It first checks the in-memory cache. If missing, it generates a new one.
 //
 // Parameters:
-//   domain (string): The target domain name (SNI).
+//
+//	domain (string): The target domain name (SNI).
 //
 // Return Value:
-//   (*tls.Certificate): The certificate to use for the handshake.
-//   (error): Error if generation fails.
+//
+//	(*tls.Certificate): The certificate to use for the handshake.
+//	(error): Error if generation fails.
 //
 // Implementation Logic:
-//   1. Check LRU cache (thread-safe). If found, return immediately.
-//   2. If not found, call generateServerCert to create a new one.
-//      (Note: There is a potential optimization point here using singleflight to prevent
-//       duplicate work on concurrent requests for the same domain).
-//   3. Store the new certificate in the cache.
-//   4. Return the certificate.
+//  1. Check LRU cache (thread-safe). If found, return immediately.
+//  2. If not found, call generateServerCert to create a new one.
+//     (Note: There is a potential optimization point here using singleflight to prevent
+//     duplicate work on concurrent requests for the same domain).
+//  3. Store the new certificate in the cache.
+//  4. Return the certificate.
 func (cm *CertManager) GetCertificate(domain string) (*tls.Certificate, error) {
 	cm.mu.Lock()
 	if cert, ok := cm.cache.Get(domain); ok {
@@ -465,27 +487,30 @@ func (cm *CertManager) GetCertificate(domain string) (*tls.Certificate, error) {
 // generateServerCert creates a new leaf certificate for a specific domain.
 //
 // Description:
-//   Generates a 2048-bit RSA key pair and creates a certificate signed by the
-//   internal CA. It supports wildcard domains to reduce the number of generated certs.
+//
+//	Generates a 2048-bit RSA key pair and creates a certificate signed by the
+//	internal CA. It supports wildcard domains to reduce the number of generated certs.
 //
 // Parameters:
-//   domain (string): The domain name to generate the certificate for.
+//
+//	domain (string): The domain name to generate the certificate for.
 //
 // Return Value:
-//   (*tls.Certificate): The generated certificate pair.
-//   (error): Error if any step fails.
+//
+//	(*tls.Certificate): The generated certificate pair.
+//	(error): Error if any step fails.
 //
 // Implementation Logic:
-//   1. Generate a temporary 2048-bit RSA key.
-//   2. Determine if a wildcard domain (e.g., *.example.com) should be used based on the domain depth.
-//   3. Create a certificate template with:
-//      - Unique serial number.
-//      - Validity period (7 days).
-//      - KeyUsage (DigitalSignature, KeyEncipherment).
-//      - ExtKeyUsage (ServerAuth).
-//      - DNSNames (SANs) including the domain and optional wildcard.
-//   4. Sign the template using the CA's private key.
-//   5. Return the tls.Certificate.
+//  1. Generate a temporary 2048-bit RSA key.
+//  2. Determine if a wildcard domain (e.g., *.example.com) should be used based on the domain depth.
+//  3. Create a certificate template with:
+//     - Unique serial number.
+//     - Validity period (7 days).
+//     - KeyUsage (DigitalSignature, KeyEncipherment).
+//     - ExtKeyUsage (ServerAuth).
+//     - DNSNames (SANs) including the domain and optional wildcard.
+//  4. Sign the template using the CA's private key.
+//  5. Return the tls.Certificate.
 func (cm *CertManager) generateServerCert(domain string) (*tls.Certificate, error) {
 	logDebug("Generating cert for %s", domain)
 
@@ -512,7 +537,7 @@ func (cm *CertManager) generateServerCert(domain string) (*tls.Certificate, erro
 		Subject: pkix.Name{
 			CommonName: domain,
 		},
-		NotBefore: time.Now().Add(-time.Hour), // Allow for clock skew
+		NotBefore: time.Now().Add(-time.Hour),  // Allow for clock skew
 		NotAfter:  time.Now().AddDate(0, 0, 7), // Short validity (7 days)
 
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -539,8 +564,9 @@ func (cm *CertManager) generateServerCert(domain string) (*tls.Certificate, erro
 // LRUCache implements a Least Recently Used (LRU) cache with fixed size.
 //
 // Description:
-//   Uses a combination of a doubly linked list and a hash map to provide O(1) access
-//   and eviction.
+//
+//	Uses a combination of a doubly linked list and a hash map to provide O(1) access
+//	and eviction.
 type LRUCache struct {
 	size int                      // Maximum capacity
 	ll   *list.List               // Doubly linked list for order
@@ -556,10 +582,12 @@ type cacheItem struct {
 // NewLRUCache initializes a new LRUCache.
 //
 // Parameters:
-//   size (int): The maximum number of items.
+//
+//	size (int): The maximum number of items.
 //
 // Return Value:
-//   (*LRUCache): The initialized cache.
+//
+//	(*LRUCache): The initialized cache.
 func NewLRUCache(size int) *LRUCache {
 	return &LRUCache{
 		size: size,
@@ -571,14 +599,17 @@ func NewLRUCache(size int) *LRUCache {
 // Get retrieves an item from the cache.
 //
 // Parameters:
-//   key (string): The lookup key (domain).
+//
+//	key (string): The lookup key (domain).
 //
 // Return Value:
-//   (*tls.Certificate): The value if found.
-//   (bool): True if found, false otherwise.
+//
+//	(*tls.Certificate): The value if found.
+//	(bool): True if found, false otherwise.
 //
 // Implementation Logic:
-//   If found, moves the element to the front of the list (mark as recently used) and returns it.
+//
+//	If found, moves the element to the front of the list (mark as recently used) and returns it.
 func (c *LRUCache) Get(key string) (*tls.Certificate, bool) {
 	if ele, ok := c.data[key]; ok {
 		c.ll.MoveToFront(ele)
@@ -590,13 +621,14 @@ func (c *LRUCache) Get(key string) (*tls.Certificate, bool) {
 // Add inserts or updates an item in the cache.
 //
 // Parameters:
-//   key (string): The domain key.
-//   cert (*tls.Certificate): The certificate to store.
+//
+//	key (string): The domain key.
+//	cert (*tls.Certificate): The certificate to store.
 //
 // Implementation Logic:
-//   1. If key exists, update value and move to front.
-//   2. If key is new, push to front.
-//   3. If size exceeds capacity, remove the oldest item (back of list).
+//  1. If key exists, update value and move to front.
+//  2. If key is new, push to front.
+//  3. If size exceeds capacity, remove the oldest item (back of list).
 func (c *LRUCache) Add(key string, cert *tls.Certificate) {
 	if ele, ok := c.data[key]; ok {
 		c.ll.MoveToFront(ele)
@@ -613,7 +645,8 @@ func (c *LRUCache) Add(key string, cert *tls.Certificate) {
 // removeOldest removes the least recently used item.
 //
 // Implementation Logic:
-//   Removes the element from the back of the list and deletes it from the map.
+//
+//	Removes the element from the back of the list and deletes it from the map.
 func (c *LRUCache) removeOldest() {
 	ele := c.ll.Back()
 	if ele != nil {
@@ -627,12 +660,12 @@ func (c *LRUCache) removeOldest() {
 // ProxyServer is the core HTTP handler for the proxy.
 //
 // Description:
-//   It implements http.Handler and routes requests based on the method (CONNECT vs others).
-//   It holds references to the CertManager, Client, and Interceptors.
+//
+//	It implements http.Handler and routes requests based on the method (CONNECT vs others).
+//	It holds references to the CertManager, Client, and Interceptors.
 type ProxyServer struct {
 	CertManager         *CertManager
 	Client              *http.Client
-	UpstreamProxy       *url.URL
 	RequestInterceptor  RequestInterceptor
 	ResponseInterceptor ResponseInterceptor
 }
@@ -640,8 +673,9 @@ type ProxyServer struct {
 // bufferedConn wraps a net.Conn with a bufio.Reader.
 //
 // Description:
-//   This is used to read initial bytes (peek) without consuming them from the socket,
-//   allowing the subsequent logic to read the same bytes again.
+//
+//	This is used to read initial bytes (peek) without consuming them from the socket,
+//	allowing the subsequent logic to read the same bytes again.
 type bufferedConn struct {
 	net.Conn
 	r io.Reader
@@ -654,16 +688,19 @@ func (b *bufferedConn) Read(p []byte) (int, error) {
 // peekSNI reads the start of the connection to extract the SNI extension.
 //
 // Description:
-//   It peeks at the first few bytes of the TLS ClientHello handshake message
-//   to determine the Server Name Indication (SNI) without consuming the stream.
+//
+//	It peeks at the first few bytes of the TLS ClientHello handshake message
+//	to determine the Server Name Indication (SNI) without consuming the stream.
 //
 // Parameters:
-//   conn (net.Conn): The raw TCP connection.
+//
+//	conn (net.Conn): The raw TCP connection.
 //
 // Return Value:
-//   (string): The extracted SNI hostname, or empty if not found.
-//   (net.Conn): A wrapper connection that includes the peeked bytes.
-//   (error): Read error if any.
+//
+//	(string): The extracted SNI hostname, or empty if not found.
+//	(net.Conn): A wrapper connection that includes the peeked bytes.
+//	(error): Read error if any.
 func peekSNI(conn net.Conn) (string, net.Conn, error) {
 	br := bufio.NewReader(conn)
 
@@ -680,13 +717,16 @@ func peekSNI(conn net.Conn) (string, net.Conn, error) {
 // parseSNI parses the TLS ClientHello packet to find the SNI.
 //
 // Description:
-//   Iterates through the TLS record and handshake protocol to find the Server Name extension.
+//
+//	Iterates through the TLS record and handshake protocol to find the Server Name extension.
 //
 // Parameters:
-//   data ([]byte): The raw bytes of the ClientHello.
+//
+//	data ([]byte): The raw bytes of the ClientHello.
 //
 // Return Value:
-//   (string): The SNI hostname.
+//
+//	(string): The SNI hostname.
 func parseSNI(data []byte) string {
 	if len(data) < 43 {
 		return ""
@@ -751,7 +791,7 @@ func parseSNI(data []byte) string {
 			if pos+2 >= end {
 				return ""
 			}
-			pos += 2 // Skip Server Name List Length
+			pos += 2                            // Skip Server Name List Length
 			if pos < end && data[pos] == 0x00 { // Name Type: Host Name (0)
 				pos++
 				if pos+1 >= end {
@@ -773,12 +813,14 @@ func parseSNI(data []byte) string {
 // ServeHTTP implements the http.Handler interface.
 //
 // Description:
-//   Dispatches requests. HTTPS requests (CONNECT) are handled by handleConnect.
-//   Plain HTTP requests are redirected to HTTPS to enforce security.
+//
+//	Dispatches requests. HTTPS requests (CONNECT) are handled by handleConnect.
+//	Plain HTTP requests are redirected to HTTPS to enforce security.
 //
 // Parameters:
-//   w (http.ResponseWriter): The response writer.
-//   r (*http.Request): The incoming request.
+//
+//	w (http.ResponseWriter): The response writer.
+//	r (*http.Request): The incoming request.
 func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		p.handleConnect(w, r)
@@ -796,23 +838,27 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+var connDataStore sync.Map
+
 // handleConnect establishes the HTTPS tunnel and performs MITM interception.
 //
 // Description:
-//   Hijacks the client TCP connection, pretends to be the upstream server (TLS Handshake),
-//   and then proxies the decrypted HTTP traffic.
+//
+//	Hijacks the client TCP connection, pretends to be the upstream server (TLS Handshake),
+//	and then proxies the decrypted HTTP traffic.
 //
 // Parameters:
-//   w (http.ResponseWriter): Response writer.
-//   r (*http.Request): The CONNECT request.
+//
+//	w (http.ResponseWriter): Response writer.
+//	r (*http.Request): The CONNECT request.
 //
 // Implementation Logic:
-//   1. Hijack the connection from the HTTP server.
-//   2. Send "200 Connection Established" to the client.
-//   3. Peek the SNI from the client's ClientHello.
-//   4. Generate/Get a certificate for the SNI (or target host).
-//   5. Perform TLS handshake with the client (as the server).
-//   6. Launch an internal HTTP server (TunnelHandler) over this TLS connection to handle the actual requests.
+//  1. Hijack the connection from the HTTP server.
+//  2. Send "200 Connection Established" to the client.
+//  3. Peek the SNI from the client's ClientHello.
+//  4. Generate/Get a certificate for the SNI (or target host).
+//  5. Perform TLS handshake with the client (as the server).
+//  6. Launch an internal HTTP server (TunnelHandler) over this TLS connection to handle the actual requests.
 func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	destHost := r.URL.Host
 	targetHost, targetPort, _ := net.SplitHostPort(destHost)
@@ -877,9 +923,22 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// --- Step 6: Start Inner HTTP Server ---
 	tunnelHandler := &TunnelHandler{
-		proxy:       p,
-		targetHost:  targetHost,
-		targetPort:  targetPort,
+		proxy: p,
+	}
+
+	mdwc := &MyDataWithConn{
+		targetHost: targetHost,
+		targetPort: targetPort,
+	}
+
+	key := getKey(tlsClientConn)
+
+	_, isload := connDataStore.LoadOrStore(key, mdwc)
+
+	logMy("key %s isload %s", key, isload)
+	if isload {
+		logMy("键已经存在")
+		os.Exit(0)
 	}
 
 	listener := &SingleConnListener{
@@ -887,16 +946,20 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	innerServer := &http.Server{
-		Handler: tunnelHandler,
+		Handler:     tunnelHandler,
+		ConnContext: myConnContextHook,
 	}
 
 	logDebug("MitM Session started for %s (SNI: %s, Proto: %s)", targetHost, sni, tlsClientConn.ConnectionState().NegotiatedProtocol)
-	
+
 	if err := innerServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 		// Ignore "use of closed network connection" errors as they are expected on shutdown
 		if !strings.Contains(err.Error(), "use of closed network connection") {
 			logDebug("Inner server error for %s: %v", targetHost, err)
+		} else {
+
 		}
+	} else {
 	}
 
 	logDebug("MitM Session closed for %s", targetHost)
@@ -905,9 +968,10 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 // handleHTTP handles plain HTTP requests (not currently supported/used).
 //
 // Description:
-//   Since we force HTTPS, this handler simply returns an error or redirect.
-//   However, if ServeHTTP logic allows, this would handle plain HTTP proxying.
-func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
+//
+//	Since we force HTTPS, this handler simply returns an error or redirect.
+//	However, if ServeHTTP logic allows, this would handle plain HTTP proxying.
+func (p *ProxyServer) handleHTTP(w http.ResponseWriter, _ *http.Request) {
 	http.Error(w, "Plain HTTP not supported, use HTTPS", http.StatusForbidden)
 }
 
@@ -916,28 +980,35 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 // TunnelHandler handles the decrypted HTTP requests within the TLS tunnel.
 //
 // Description:
-//   Receives requests from the internal HTTP server (after TLS termination),
-//   intercepts them, forwards them to the upstream, and returns the response.
+//
+//	Receives requests from the internal HTTP server (after TLS termination),
+//	intercepts them, forwards them to the upstream, and returns the response.
 type TunnelHandler struct {
-	proxy       *ProxyServer
-	targetHost  string
-	targetPort  string
+	proxy *ProxyServer
 }
 
 // ServeHTTP processes individual requests inside the tunnel.
 //
 // Parameters:
-//   w (http.ResponseWriter): Response writer.
-//   r (*http.Request): Incoming request.
+//
+//	w (http.ResponseWriter): Response writer.
+//	r (*http.Request): Incoming request.
 //
 // Implementation Logic:
-//   1. Reconstruct the absolute URL for the request.
-//   2. Invoke RequestInterceptor.
-//   3. Handle GET/HEAD requests with body issues (explicitly clear body).
-//   4. Forward the request using the ProxyServer's Client.
-//   5. Invoke ResponseInterceptor.
-//   6. Copy response headers and body back to the client.
+//  1. Reconstruct the absolute URL for the request.
+//  2. Invoke RequestInterceptor.
+//  3. Handle GET/HEAD requests with body issues (explicitly clear body).
+//  4. Forward the request using the ProxyServer's Client.
+//  5. Invoke ResponseInterceptor.
+//  6. Copy response headers and body back to the client.
 func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	data, ok := r.Context().Value(connDataKey).(*MyDataWithConn)
+	if ok {
+
+		logMy("h %s, p %s", data.targetHost, data.targetPort)
+
+	}
+
 	// --- Step 1: Reconstruct URL ---
 	if r.URL.Scheme == "" {
 		r.URL.Scheme = "https"
@@ -945,23 +1016,23 @@ func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Host == "" {
 		r.URL.Host = r.Host
 		if r.URL.Host == "" {
-			r.URL.Host = net.JoinHostPort(h.targetHost, h.targetPort)
+			r.URL.Host = net.JoinHostPort(data.targetHost, data.targetPort)
 		}
 	}
-	
+
 	r.RequestURI = "" // Must be empty for Client.Do
-	
-	logDebug("[%s] Request received: %s %s", h.targetHost, r.Method, r.URL.String())
+
+	logDebug("[%s] Request received: %s %s", data.targetHost, r.Method, r.URL.String())
 
 	// --- Step 2: Request Interception ---
 	if h.proxy.RequestInterceptor != nil {
 		if err := h.proxy.RequestInterceptor.OnRequest(r); err != nil {
-			logDebug("[%s] Request intercepted error: %v", h.targetHost, err)
+			logDebug("[%s] Request intercepted error: %v", data.targetHost, err)
 			http.Error(w, "Request Intercepted", http.StatusBadGateway)
 			return
 		}
 	}
-	logDebug("[%s] Request received: %s %s", h.targetHost, r.Method, r.URL.String())
+	logDebug("[%s] Request received: %s %s", data.targetHost, r.Method, r.URL.String())
 
 	// --- Step 3: Forward Request ---
 	// Important: GET and HEAD requests must not have a body.
@@ -972,18 +1043,18 @@ func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.proxy.Client.Do(r)
 	if err != nil {
-		logDebug("[%s] Forward error: %v", h.targetHost, err)
+		logDebug("[%s] Forward error: %v", data.targetHost, err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	logDebug("[%s] Response received: %s", h.targetHost, resp.Status)
+	logDebug("[%s] Response received: %s", data.targetHost, resp.Status)
 
 	// --- Step 4: Response Interception ---
 	if h.proxy.ResponseInterceptor != nil {
 		if err := h.proxy.ResponseInterceptor.OnResponse(resp); err != nil {
-			logDebug("[%s] Response intercepted error: %v", h.targetHost, err)
+			logDebug("[%s] Response intercepted error: %v", data.targetHost, err)
 			http.Error(w, "Response Intercepted", http.StatusBadGateway)
 			return
 		}
@@ -998,8 +1069,9 @@ func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // copyHeader copies HTTP headers from source to destination.
 //
 // Parameters:
-//   dst (http.Header): Destination headers.
-//   src (http.Header): Source headers.
+//
+//	dst (http.Header): Destination headers.
+//	src (http.Header): Source headers.
 func copyHeader(dst, src http.Header) {
 	for k, vv := range src {
 		for _, v := range vv {
@@ -1011,31 +1083,82 @@ func copyHeader(dst, src http.Header) {
 // SingleConnListener adapts a single net.Conn to the net.Listener interface.
 //
 // Description:
-//   This allows an http.Server to serve a single pre-established connection
-//   and then stop. It is used for the inner HTTP server in the MITM tunnel.
+//
+//	This allows an http.Server to serve a single pre-established connection
+//	and then stop. It is used for the inner HTTP server in the MITM tunnel.
 type SingleConnListener struct {
 	conn net.Conn
 	mu   sync.Mutex
 	done bool
+	N    int32
+}
+
+type MyDataWithConn struct {
+	targetHost string
+	targetPort string
+}
+
+func logMy(format string, v ...interface{}) {
+	log.Printf("[LOG] "+format, v...)
+}
+
+type contextKey string
+
+const connDataKey contextKey = "custom-conn-data"
+
+func getKey(c net.Conn) string {
+	return c.RemoteAddr().String()
+
+}
+
+func myConnContextHook(ctx context.Context, c net.Conn) context.Context {
+
+	key := getKey(c)
+	v, isload := connDataStore.LoadAndDelete(key)
+
+	if !isload {
+		logMy("key not load %s", key)
+
+		os.Exit(0)
+
+	}
+
+	// 类型断言：检查是否是我们自定义的 Conn
+	if v, ok := v.(*MyDataWithConn); ok {
+		logMy("myConnContextHook ok")
+		// 将数据注入到 Context 中
+		// 注意：这里创建了一个派生的 Context
+		ctx = context.WithValue(ctx, connDataKey, v)
+	} else {
+		logMy("type is not MyDataWithConn")
+
+		os.Exit(0)
+	}
+	return ctx
 }
 
 // Accept returns the connection once, then closes.
 //
 // Return Value:
-//   (net.Conn): The connection (first call).
-//   (error): net.ErrClosed (subsequent calls).
+//
+//	(net.Conn): The connection (first call).
+//	(error): net.ErrClosed (subsequent calls).
 func (l *SingleConnListener) Accept() (net.Conn, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.done {
+		logMy("SingleConn 2 run %v", l.N)
 		return nil, net.ErrClosed
 	}
 	l.done = true
+
+	logMy("SingleConn 1 run %v", l.N)
 	return l.conn, nil
 }
 
 // Close is a no-op for this listener as it doesn't own a listening socket.
 func (l *SingleConnListener) Close() error {
+	logMy("SingleConn close %v", l.N)
 	return nil
 }
 
