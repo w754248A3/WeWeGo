@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"container/list"
 	"context"
 	"crypto/rand"
@@ -683,146 +682,6 @@ type ProxyServer struct {
 	ResponseInterceptor ResponseInterceptor
 }
 
-// bufferedConn wraps a net.Conn with a bufio.Reader.
-//
-// Description:
-//
-//	This is used to read initial bytes (peek) without consuming them from the socket,
-//	allowing the subsequent logic to read the same bytes again.
-type bufferedConn struct {
-	net.Conn
-	r io.Reader
-}
-
-func (b *bufferedConn) Read(p []byte) (int, error) {
-	return b.r.Read(p)
-}
-
-// peekSNI reads the start of the connection to extract the SNI extension.
-//
-// Description:
-//
-//	It peeks at the first few bytes of the TLS ClientHello handshake message
-//	to determine the Server Name Indication (SNI) without consuming the stream.
-//
-// Parameters:
-//
-//	conn (net.Conn): The raw TCP connection.
-//
-// Return Value:
-//
-//	(string): The extracted SNI hostname, or empty if not found.
-//	(net.Conn): A wrapper connection that includes the peeked bytes.
-//	(error): Read error if any.
-func peekSNI(conn net.Conn) (string, net.Conn, error) {
-	br := bufio.NewReader(conn)
-
-	// Peek enough bytes to cover most ClientHello headers (1024 bytes is usually sufficient)
-	data, err := br.Peek(1024)
-	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return "", &bufferedConn{Conn: conn, r: br}, err
-	}
-
-	sni := parseSNI(data)
-	return sni, &bufferedConn{Conn: conn, r: br}, nil
-}
-
-// parseSNI parses the TLS ClientHello packet to find the SNI.
-//
-// Description:
-//
-//	Iterates through the TLS record and handshake protocol to find the Server Name extension.
-//
-// Parameters:
-//
-//	data ([]byte): The raw bytes of the ClientHello.
-//
-// Return Value:
-//
-//	(string): The SNI hostname.
-func parseSNI(data []byte) string {
-	if len(data) < 43 {
-		return ""
-	}
-
-	// 0x16 = Handshake Record
-	if data[0] != 0x16 {
-		return ""
-	}
-
-	pos := 5 // Skip Record Header (5 bytes)
-	if len(data) < pos+4 {
-		return ""
-	}
-
-	// 0x01 = Client Hello
-	if data[pos] != 0x01 {
-		return ""
-	}
-
-	pos += 38 // Skip Handshake Header(4), Version(2), Random(32)
-
-	// Skip Session ID
-	if pos >= len(data) {
-		return ""
-	}
-	sessionIDLen := int(data[pos])
-	pos += 1 + sessionIDLen
-
-	// Skip Cipher Suites
-	if pos+1 >= len(data) {
-		return ""
-	}
-	cipherSuiteLen := int(data[pos])<<8 | int(data[pos+1])
-	pos += 2 + cipherSuiteLen
-
-	// Skip Compression Methods
-	if pos >= len(data) {
-		return ""
-	}
-	compressionLen := int(data[pos])
-	pos += 1 + compressionLen
-
-	// Parse Extensions
-	if pos+1 >= len(data) {
-		return ""
-	}
-	extensionsLen := int(data[pos])<<8 | int(data[pos+1])
-	pos += 2
-
-	end := pos + extensionsLen
-	if end > len(data) {
-		end = len(data)
-	}
-
-	for pos+4 < end {
-		extType := int(data[pos])<<8 | int(data[pos+1])
-		extLen := int(data[pos+2])<<8 | int(data[pos+3])
-		pos += 4
-
-		if extType == 0x00 { // 0x00 is SNI extension
-			if pos+2 >= end {
-				return ""
-			}
-			pos += 2                            // Skip Server Name List Length
-			if pos < end && data[pos] == 0x00 { // Name Type: Host Name (0)
-				pos++
-				if pos+1 >= end {
-					return ""
-				}
-				nameLen := int(data[pos])<<8 | int(data[pos+1])
-				pos += 2
-				if pos+nameLen <= end {
-					return string(data[pos : pos+nameLen])
-				}
-			}
-		}
-		pos += extLen
-	}
-
-	return ""
-}
-
 // ServeHTTP implements the http.Handler interface.
 //
 // Description:
@@ -874,7 +733,14 @@ var connDataStore sync.Map
 //  6. Launch an internal HTTP server (TunnelHandler) over this TLS connection to handle the actual requests.
 func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	destHost := r.URL.Host
-	targetHost, targetPort, _ := net.SplitHostPort(destHost)
+
+	targetHost, targetPort, err := net.SplitHostPort(destHost)
+
+	if err != nil {
+		http.Error(w, "Host error", http.StatusBadRequest)
+		return
+	}
+
 	if targetHost == "" {
 		targetHost = destHost
 	}
@@ -902,17 +768,10 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- Step 3: Peek SNI ---
-	sni, clientConn, err := peekSNI(rawClientConn)
-	if err != nil {
-		log.Printf("Failed to peek SNI for %s: %v", targetHost, err)
-	}
-
+	clientConn := rawClientConn
 	// --- Step 4: Prepare Certificate and TLS ---
-	certHost := sni
-	if certHost == "" {
-		certHost = targetHost
-	}
+	certHost := targetHost
+
 	cert, err := p.CertManager.GetCertificate(certHost)
 	if err != nil {
 		log.Printf("Failed to get certificate for %s: %v", certHost, err)
@@ -951,8 +810,6 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.connCh <- tlsClientConn
-
-	logDebug("MitM Session started for %s (SNI: %s, Proto: %s)", targetHost, sni, tlsClientConn.ConnectionState().NegotiatedProtocol)
 
 }
 
@@ -1020,6 +877,7 @@ type TunnelHandler struct {
 //  5. Invoke ResponseInterceptor.
 //  6. Copy response headers and body back to the client.
 func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+
 	data, ok := r.Context().Value(connDataKey).(*MyDataWithConn)
 	if !ok {
 
