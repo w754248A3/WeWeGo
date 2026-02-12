@@ -275,12 +275,17 @@ func handleProxy() {
 	upstreamHostUrlStr := flag.String("upstreamHostUrl", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
 
 	flag.CommandLine.Parse(os.Args[2:])
+	var err error
+
+	addr, err := net.ResolveTCPAddr("tcp", *listenAddr)
+	if err != nil {
+		log.Fatalf("listenAddr error %s", err.Error())
+	}
 
 	if *upstreamHostUrlStr == "" {
 		log.Fatalf("Upstream host is required")
 	}
 
-	var err error
 	if _, err = url.Parse(*upstreamHostUrlStr); err != nil {
 		log.Fatalf("Invalid upstream host URL: %v", err)
 	}
@@ -327,8 +332,12 @@ func handleProxy() {
 
 	demo := NewDemoInterceptor(*upstreamHostUrlStr)
 
+	conCh := make(chan net.Conn, 3)
+
 	// --- Step 4: Initialize ProxyServer ---
 	proxy := &ProxyServer{
+		Addr:                addr,
+		connCh:              conCh,
 		CertManager:         cm,
 		RequestInterceptor:  demo,
 		ResponseInterceptor: demo,
@@ -340,6 +349,8 @@ func handleProxy() {
 			},
 		},
 	}
+
+	go startHTTP(conCh, addr, proxy)
 
 	server := &http.Server{
 		Addr:    *listenAddr,
@@ -666,6 +677,8 @@ func (c *LRUCache) removeOldest() {
 type ProxyServer struct {
 	CertManager         *CertManager
 	Client              *http.Client
+	connCh              chan net.Conn
+	Addr                net.Addr
 	RequestInterceptor  RequestInterceptor
 	ResponseInterceptor ResponseInterceptor
 }
@@ -922,9 +935,6 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- Step 6: Start Inner HTTP Server ---
-	tunnelHandler := &TunnelHandler{
-		proxy: p,
-	}
 
 	mdwc := &MyDataWithConn{
 		targetHost: targetHost,
@@ -935,14 +945,26 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	_, isload := connDataStore.LoadOrStore(key, mdwc)
 
-	logMy("key %s isload %s", key, isload)
 	if isload {
 		logMy("键已经存在")
 		os.Exit(0)
 	}
 
+	p.connCh <- tlsClientConn
+
+	logDebug("MitM Session started for %s (SNI: %s, Proto: %s)", targetHost, sni, tlsClientConn.ConnectionState().NegotiatedProtocol)
+
+}
+
+func startHTTP(connCh chan net.Conn, addr net.Addr, p *ProxyServer) {
+
+	tunnelHandler := &TunnelHandler{
+		proxy: p,
+	}
+
 	listener := &SingleConnListener{
-		conn: tlsClientConn,
+		connCh: connCh,
+		addr:   addr,
 	}
 
 	innerServer := &http.Server{
@@ -950,19 +972,15 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		ConnContext: myConnContextHook,
 	}
 
-	logDebug("MitM Session started for %s (SNI: %s, Proto: %s)", targetHost, sni, tlsClientConn.ConnectionState().NegotiatedProtocol)
-
 	if err := innerServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 		// Ignore "use of closed network connection" errors as they are expected on shutdown
-		if !strings.Contains(err.Error(), "use of closed network connection") {
-			logDebug("Inner server error for %s: %v", targetHost, err)
-		} else {
-
-		}
+		logMy("serve close %s", err.Error())
 	} else {
+		logMy("serve close")
 	}
 
-	logDebug("MitM Session closed for %s", targetHost)
+	logDebug("MitM Session closed for")
+
 }
 
 // handleHTTP handles plain HTTP requests (not currently supported/used).
@@ -1003,21 +1021,18 @@ type TunnelHandler struct {
 //  6. Copy response headers and body back to the client.
 func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	data, ok := r.Context().Value(connDataKey).(*MyDataWithConn)
-	if ok {
+	if !ok {
 
-		logMy("h %s, p %s", data.targetHost, data.targetPort)
+		logMy("ServeHTTP key not MyDataWithConn")
 
 	}
 
-	// --- Step 1: Reconstruct URL ---
-	if r.URL.Scheme == "" {
-		r.URL.Scheme = "https"
-	}
-	if r.URL.Host == "" {
-		r.URL.Host = r.Host
-		if r.URL.Host == "" {
-			r.URL.Host = net.JoinHostPort(data.targetHost, data.targetPort)
-		}
+	r.URL.Scheme = "https"
+
+	if r.Host == "" {
+		r.URL.Host = net.JoinHostPort(data.targetHost, data.targetPort)
+	} else {
+		r.URL.Host = net.JoinHostPort(r.Host, data.targetPort)
 	}
 
 	r.RequestURI = "" // Must be empty for Client.Do
@@ -1087,10 +1102,8 @@ func copyHeader(dst, src http.Header) {
 //	This allows an http.Server to serve a single pre-established connection
 //	and then stop. It is used for the inner HTTP server in the MITM tunnel.
 type SingleConnListener struct {
-	conn net.Conn
-	mu   sync.Mutex
-	done bool
-	N    int32
+	connCh <-chan net.Conn
+	addr   net.Addr
 }
 
 type MyDataWithConn struct {
@@ -1125,7 +1138,7 @@ func myConnContextHook(ctx context.Context, c net.Conn) context.Context {
 
 	// 类型断言：检查是否是我们自定义的 Conn
 	if v, ok := v.(*MyDataWithConn); ok {
-		logMy("myConnContextHook ok")
+
 		// 将数据注入到 Context 中
 		// 注意：这里创建了一个派生的 Context
 		ctx = context.WithValue(ctx, connDataKey, v)
@@ -1144,27 +1157,25 @@ func myConnContextHook(ctx context.Context, c net.Conn) context.Context {
 //	(net.Conn): The connection (first call).
 //	(error): net.ErrClosed (subsequent calls).
 func (l *SingleConnListener) Accept() (net.Conn, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.done {
-		logMy("SingleConn 2 run %v", l.N)
+
+	if v, ok := <-l.connCh; ok {
+		return v, nil
+	} else {
+
 		return nil, net.ErrClosed
 	}
-	l.done = true
 
-	logMy("SingleConn 1 run %v", l.N)
-	return l.conn, nil
 }
 
 // Close is a no-op for this listener as it doesn't own a listening socket.
 func (l *SingleConnListener) Close() error {
-	logMy("SingleConn close %v", l.N)
+
 	return nil
 }
 
 // Addr returns the local address of the connection.
 func (l *SingleConnListener) Addr() net.Addr {
-	return l.conn.LocalAddr()
+	return l.addr
 }
 
 // --- Filters & Interceptors ---
