@@ -270,6 +270,7 @@ func handleProxy() {
 	caKeyPath := flag.String("cakey", "ca-key.pem", "Path to CA private key")
 	listenAddr := flag.String("listen", "127.0.0.1:8443", "Listen address")
 	cacheSize := flag.Int("certCacheSize", 200, "Size of the certificate cache")
+	cmStr := flag.String("cm", "c", "CertManager  s | c   s = SingleCertManager c = CertManager")
 	upstreamProxyStr := flag.String("upstreamProxyUrl", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
 	upstreamHostUrlStr := flag.String("upstreamHostUrl", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
 
@@ -312,7 +313,7 @@ func handleProxy() {
 		log.Fatalf("Failed to load CA: %v", err)
 	}
 
-	cm := NewCertManager(ca, *cacheSize)
+	cm := NewCertManager(ca, *cacheSize, *cmStr)
 
 	// --- Step 3: Configure Transport and Interceptors ---
 	transport := &http.Transport{
@@ -377,6 +378,10 @@ func handleProxy() {
 	}
 }
 
+type getServeCerter interface {
+	GetCertificate(domain string) (*tls.Certificate, error)
+}
+
 // --- CertManager & LRU Cache ---
 
 // CertManager manages the dynamic generation and caching of TLS certificates.
@@ -420,12 +425,26 @@ type CertManager struct {
 //  1. Parse the x509 leaf certificate from the tls.Certificate.
 //  2. Initialize the LRUCache.
 //  3. Return the struct.
-func NewCertManager(ca tls.Certificate, cacheSize int) *CertManager {
+func NewCertManager(ca tls.Certificate, cacheSize int, flag string) getServeCerter {
 	cert, _ := x509.ParseCertificate(ca.Certificate[0])
-	return &CertManager{
-		caCert:    cert,
-		caPrivKey: ca.PrivateKey,
-		cache:     NewLRUCache(cacheSize),
+
+	if flag == "c" {
+		return &CertManager{
+			caCert:    cert,
+			caPrivKey: ca.PrivateKey,
+			cache:     NewLRUCache(cacheSize),
+		}
+	} else if flag == "s" {
+		return &SingleCertManager{
+			caCert:    cert,
+			caPrivKey: ca.PrivateKey,
+			domainMap: make(map[string]bool),
+		}
+	} else {
+		logMy("error cm flag %s", flag)
+
+		os.Exit(0)
+		return nil
 	}
 }
 
@@ -674,7 +693,7 @@ func (c *LRUCache) removeOldest() {
 //	It implements http.Handler and routes requests based on the method (CONNECT vs others).
 //	It holds references to the CertManager, Client, and Interceptors.
 type ProxyServer struct {
-	CertManager         *CertManager
+	CertManager         getServeCerter
 	Client              *http.Client
 	connCh              chan net.Conn
 	Addr                net.Addr
