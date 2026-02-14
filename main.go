@@ -273,6 +273,7 @@ func handleProxy() {
 	cmStr := flag.String("cm", "c", "CertManager  s | c   s = SingleCertManager c = CertManager")
 	upstreamProxyStr := flag.String("upstreamProxyUrl", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
 	upstreamHostUrlStr := flag.String("upstreamHostUrl", "", "Upstream proxy URL (e.g. http://127.0.0.1:8080)")
+	upDnsServe := flag.String("upDnsServe", "", "Google DNS 8.8.8.8 or Cloudflare 1.1.1.1")
 
 	flag.CommandLine.Parse(os.Args[2:])
 	var err error
@@ -322,6 +323,11 @@ func handleProxy() {
 			NextProtos: []string{"h2", "http/1.1"},
 		},
 		ForceAttemptHTTP2: true,
+	}
+
+	if *upDnsServe != "" {
+		logMy("use dns serve %s", *upDnsServe)
+		transport.DialContext = NewUserDNS(*upDnsServe).DialContext
 	}
 
 	if upstreamProxyURL != nil {
